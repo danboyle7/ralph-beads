@@ -96,8 +96,8 @@ ralph-beads/
 ├── prompt.md          # Your custom prompt for Claude (you create this)
 ├── progress.txt       # Log of Ralph's progress (auto-created)
 ├── archive/           # Previous runs archived here
-├── CLAUDE.md          # Instructions for Claude Code sessions
-├── AGENTS.md          # Beads workflow instructions
+├── CLAUDE.md          # Points to AGENTS.md
+├── AGENTS.md          # Guidelines for developing/maintaining this repo
 └── .beads/            # Beads database
 ```
 
