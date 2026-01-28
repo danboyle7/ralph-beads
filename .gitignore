@@ -1,0 +1,38 @@
+# Ralph runtime files
+progress.txt
+archive/
+.last-run
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Environment files (keep secrets out of repo)
+.env
+.env.local
+.env.*.local
+
+# Node modules (if any tooling is added)
+node_modules/
+
+# Python (if any tooling is added)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
