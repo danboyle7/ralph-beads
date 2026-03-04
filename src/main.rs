@@ -25,7 +25,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 mod cli;
 mod init;
@@ -359,11 +359,13 @@ fn worker_main(
 
     if let Some(logs) = debug_logs.as_mut() {
         let notice = format!(
-            "Debug logging enabled: dir={} raw={} activity={} output={}",
+            "Debug logging enabled: dir={} raw={} activity={} output={} semantic={} report={}",
             logs.run_dir_path.display(),
             logs.raw_events_path.display(),
             logs.activity_path.display(),
-            logs.output_path.display()
+            logs.output_path.display(),
+            logs.semantic_path.display(),
+            logs.report_path.display(),
         );
         logs.log_activity(&notice);
         send(&ui_tx, UiEvent::Activity(notice));
@@ -556,9 +558,13 @@ struct DebugLogs {
     raw_events_path: PathBuf,
     activity_path: PathBuf,
     output_path: PathBuf,
+    semantic_path: PathBuf,
+    report_path: PathBuf,
     raw_events_file: fs::File,
     activity_file: fs::File,
     output_file: fs::File,
+    semantic_file: fs::File,
+    report_file: fs::File,
 }
 
 impl DebugLogs {
@@ -571,6 +577,8 @@ impl DebugLogs {
         let raw_events_path = run_dir_path.join("claude-events.log");
         let activity_path = run_dir_path.join("claude-activity.log");
         let output_path = run_dir_path.join("claude-output.log");
+        let semantic_path = run_dir_path.join("claude-semantic.ndjson");
+        let report_path = run_dir_path.join("claude-output.md");
 
         let raw_events_file = fs::OpenOptions::new()
             .create(true)
@@ -590,15 +598,33 @@ impl DebugLogs {
             .write(true)
             .open(&output_path)
             .context("failed to create Claude output debug log")?;
+        let semantic_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&semantic_path)
+            .context("failed to create Claude semantic debug log")?;
+        let mut report_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&report_path)
+            .context("failed to create Claude markdown output log")?;
+        writeln!(report_file, "# Claude Output Report\n")
+            .context("failed to initialize Claude markdown output log")?;
 
         Ok(Self {
             run_dir_path,
             raw_events_path,
             activity_path,
             output_path,
+            semantic_path,
+            report_path,
             raw_events_file,
             activity_file,
             output_file,
+            semantic_file,
+            report_file,
         })
     }
 
@@ -615,6 +641,20 @@ impl DebugLogs {
 
     fn log_output_chunk(&mut self, chunk: &str) {
         let _ = self.output_file.write_all(chunk.as_bytes());
+    }
+
+    fn log_semantic_line(&mut self, category: &str, line: &str) {
+        let timestamp = Local::now().to_rfc3339();
+        let record = json!({
+            "timestamp": timestamp,
+            "category": category,
+            "line": line,
+        });
+        let _ = writeln!(self.semantic_file, "{record}");
+    }
+
+    fn log_report_line(&mut self, line: &str) {
+        let _ = writeln!(self.report_file, "{line}");
     }
 }
 
@@ -1904,10 +1944,17 @@ fn process_claude_line(
         let semantic_events = semantic_activity_events(&value, event, render_state);
 
         for activity in semantic_events.activities {
+            if let Some(logs) = debug_logs.as_mut() {
+                logs.log_semantic_line("activity", &activity);
+            }
             send_activity(ui_tx, debug_logs, activity);
         }
 
         for line in semantic_events.output_lines {
+            if let Some(logs) = debug_logs.as_mut() {
+                logs.log_semantic_line("output", &line);
+                logs.log_report_line(&line);
+            }
             send_output_line(ui_tx, debug_logs, line.clone());
             visible_output.push_str(&line);
             visible_output.push('\n');
