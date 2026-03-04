@@ -1454,6 +1454,7 @@ struct ClaudeRenderState {
     usage_tracker: UsageTracker,
     tool_lifecycle: ToolLifecycleTracker,
     phase_tracker: RunPhaseTracker,
+    output_narrative: OutputNarrativeState,
 }
 
 #[derive(Default)]
@@ -1507,6 +1508,29 @@ struct RunPhaseTracker {
     current: Option<RunPhase>,
     validation_attempts: HashMap<String, usize>,
     pending_validation_error: Option<String>,
+}
+
+#[derive(Default)]
+struct OutputNarrativeState {
+    touched_files: HashSet<String>,
+    validation_attempts: Vec<ValidationAttemptRecord>,
+    command_evidence: Vec<String>,
+    emitted_final_report: bool,
+}
+
+struct ValidationAttemptRecord {
+    check: String,
+    attempt: usize,
+    status: String,
+    exit_code: Option<i32>,
+    duration_ms: Option<u128>,
+    reason: Option<String>,
+}
+
+#[derive(Default)]
+struct SemanticEventBundle {
+    activities: Vec<String>,
+    output_lines: Vec<String>,
 }
 
 impl UsageTracker {
@@ -1704,6 +1728,85 @@ impl RunPhaseTracker {
     }
 }
 
+impl OutputNarrativeState {
+    fn record_touched_file(&mut self, file_path: &str) {
+        self.touched_files.insert(file_path.to_string());
+    }
+
+    fn record_validation_attempt(&mut self, record: ValidationAttemptRecord) {
+        self.validation_attempts.push(record);
+    }
+
+    fn record_command_evidence(&mut self, evidence: String) {
+        if !self.command_evidence.contains(&evidence) {
+            self.command_evidence.push(evidence);
+        }
+    }
+
+    fn render_final_report(&mut self) -> Vec<String> {
+        if self.emitted_final_report {
+            return Vec::new();
+        }
+        self.emitted_final_report = true;
+
+        let mut lines = Vec::new();
+        lines.push(String::new());
+        lines.push("Execution Evidence".to_string());
+        lines.push("-".repeat(72));
+
+        if self.validation_attempts.is_empty() {
+            lines.push("Validation attempts: none captured".to_string());
+        } else {
+            lines.push("Validation attempts:".to_string());
+            lines.push("check | attempt | status | exit | duration_ms | reason".to_string());
+            for attempt in &self.validation_attempts {
+                lines.push(format!(
+                    "{} | {} | {} | {} | {} | {}",
+                    attempt.check,
+                    attempt.attempt,
+                    attempt.status,
+                    attempt
+                        .exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    attempt
+                        .duration_ms
+                        .map(|duration| duration.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    attempt
+                        .reason
+                        .as_deref()
+                        .map(|reason| compact_text(reason, 80))
+                        .unwrap_or_else(|| "-".to_string())
+                ));
+            }
+        }
+
+        if self.touched_files.is_empty() {
+            lines.push("Files changed via Edit/Write: none captured".to_string());
+        } else {
+            lines.push("Files changed via Edit/Write:".to_string());
+            let mut files = self.touched_files.iter().cloned().collect::<Vec<_>>();
+            files.sort();
+            for file in files {
+                lines.push(format!("- {file}"));
+            }
+        }
+
+        if self.command_evidence.is_empty() {
+            lines.push("Command evidence: none captured".to_string());
+        } else {
+            lines.push("Command evidence:".to_string());
+            for command in &self.command_evidence {
+                lines.push(format!("- {command}"));
+            }
+        }
+
+        lines.push("-".repeat(72));
+        lines
+    }
+}
+
 fn usage_delta_for_key(
     map: &mut HashMap<String, UsageTally>,
     key: String,
@@ -1798,8 +1901,18 @@ fn process_claude_line(
             send(ui_tx, UiEvent::Spinner(Some(label)));
         }
 
-        for activity in semantic_activity_events(&value, event, render_state) {
+        let semantic_events = semantic_activity_events(&value, event, render_state);
+
+        for activity in semantic_events.activities {
             send_activity(ui_tx, debug_logs, activity);
+        }
+
+        for line in semantic_events.output_lines {
+            send_output_line(ui_tx, debug_logs, line.clone());
+            visible_output.push_str(&line);
+            visible_output.push('\n');
+            render_state.saw_any_text = true;
+            render_state.ends_with_newline = true;
         }
 
         if let Some(activity) = activity_for_event(&value, event) {
@@ -2068,8 +2181,8 @@ fn semantic_activity_events(
     root: &Value,
     event: Option<&Value>,
     render_state: &mut ClaudeRenderState,
-) -> Vec<String> {
-    let mut activities = Vec::new();
+) -> SemanticEventBundle {
+    let mut bundle = SemanticEventBundle::default();
     let now = Instant::now();
     let root_type = root.get("type").and_then(Value::as_str);
 
@@ -2101,6 +2214,13 @@ fn semantic_activity_events(
         }
     }
 
+    if root_type == Some("result") {
+        bundle
+            .output_lines
+            .extend(render_state.output_narrative.render_final_report());
+        return bundle;
+    }
+
     if root_type == Some("assistant") {
         render_state
             .tool_lifecycle
@@ -2108,7 +2228,7 @@ fn semantic_activity_events(
     }
 
     if root_type != Some("user") {
-        return activities;
+        return bundle;
     }
 
     let content = root
@@ -2116,7 +2236,7 @@ fn semantic_activity_events(
         .and_then(|message| message.get("content"))
         .and_then(Value::as_array);
     let Some(content) = content else {
-        return activities;
+        return bundle;
     };
 
     for item in content {
@@ -2157,18 +2277,18 @@ fn semantic_activity_events(
             .unwrap_or_else(|| "unknown".to_string());
         let duration_ms = completed.as_ref().map(|tool| tool.duration_ms);
         let input_value = completed.as_ref().and_then(|tool| tool.input.as_ref());
-        let input = input_value
-            .as_ref()
-            .and_then(|value| compact_json(value, 140));
+        let input = input_value.and_then(|value| compact_json(value, 140));
 
         if let Some(phase) = phase_for_tool(&name, input_value) {
             if let Some(changed) = render_state.phase_tracker.transition_to(phase) {
-                activities.push(format!("{actor}: phase_change | to={}", changed.as_str()));
+                bundle
+                    .activities
+                    .push(format!("{actor}: phase_change | to={}", changed.as_str()));
             }
 
             if phase == RunPhase::Implement {
                 if let Some(cause) = render_state.phase_tracker.take_validation_error() {
-                    activities.push(format!(
+                    bundle.activities.push(format!(
                         "{actor}: fix_cycle_started | cause={}",
                         compact_text(&cause, 120)
                     ));
@@ -2181,7 +2301,7 @@ fn semantic_activity_events(
         if let Some(key) = validation_key.as_deref() {
             let attempt = render_state.phase_tracker.next_validation_attempt(key);
             validation_attempt = Some(attempt);
-            activities.push(format!(
+            bundle.activities.push(format!(
                 "{actor}: validation_attempt | check={key} | attempt={attempt}"
             ));
         }
@@ -2207,7 +2327,24 @@ fn semantic_activity_events(
         if let Some(excerpt) = excerpt.as_deref() {
             parts.push(format!("result={excerpt}"));
         }
-        activities.push(parts.join(" | "));
+        bundle.activities.push(parts.join(" | "));
+
+        if name == "Edit" || name == "Write" {
+            if let Some(file_path) = tool_file_path_from_input(input_value) {
+                render_state.output_narrative.record_touched_file(file_path);
+                bundle
+                    .output_lines
+                    .push(format!("Evidence | changed: {file_path}"));
+            }
+        }
+        if name == "Bash" && !is_error {
+            if let Some(command) = bash_command_from_input(input_value) {
+                let evidence = format!("{} ({status})", compact_text(command, 100));
+                render_state
+                    .output_narrative
+                    .record_command_evidence(evidence);
+            }
+        }
 
         if validation_attempt.is_some() {
             if is_error {
@@ -2229,12 +2366,29 @@ fn semantic_activity_events(
                 if let Some(excerpt) = excerpt.as_deref() {
                     result_parts.push(format!("reason={excerpt}"));
                 }
-                activities.push(result_parts.join(" | "));
+                bundle.activities.push(result_parts.join(" | "));
+                render_state
+                    .output_narrative
+                    .record_validation_attempt(ValidationAttemptRecord {
+                        check: key.to_string(),
+                        attempt: validation_attempt.unwrap_or(1),
+                        status: status.to_string(),
+                        exit_code,
+                        duration_ms,
+                        reason: excerpt.clone(),
+                    });
+                bundle.output_lines.push(format!(
+                    "Evidence | validation {key} attempt {} => {status}{}",
+                    validation_attempt.unwrap_or(1),
+                    exit_code
+                        .map(|code| format!(" (exit {code})"))
+                        .unwrap_or_default()
+                ));
             }
         }
     }
 
-    activities
+    bundle
 }
 
 fn tool_result_content_as_text(value: &Value) -> String {
@@ -2337,6 +2491,13 @@ fn bash_command_from_input(input: Option<&Value>) -> Option<&str> {
     input?
         .as_object()
         .and_then(|object| object.get("command"))
+        .and_then(Value::as_str)
+}
+
+fn tool_file_path_from_input(input: Option<&Value>) -> Option<&str> {
+    input?
+        .as_object()
+        .and_then(|object| object.get("file_path"))
         .and_then(Value::as_str)
 }
 
