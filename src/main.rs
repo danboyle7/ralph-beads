@@ -2581,7 +2581,8 @@ fn tool_file_path_from_input(input: Option<&Value>) -> Option<&str> {
 }
 
 fn compact_text(value: &str, max_chars: usize) -> String {
-    let flattened = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = sanitize_summary_text(value);
+    let flattened = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if flattened.chars().count() <= max_chars {
         flattened
     } else {
@@ -2590,6 +2591,52 @@ fn compact_text(value: &str, max_chars: usize) -> String {
         shortened.push_str("...");
         shortened
     }
+}
+
+fn sanitize_summary_text(value: &str) -> String {
+    strip_ansi_sequences(value)
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t' | '\r'))
+        .collect()
+}
+
+fn strip_ansi_sequences(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                let mut previous_was_escape = false;
+                for c in chars.by_ref() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if previous_was_escape && c == '\\' {
+                        break;
+                    }
+                    previous_was_escape = c == '\u{1b}';
+                }
+            }
+            _ => {}
+        }
+    }
+
+    output
 }
 
 fn compact_json(value: &Value, max_chars: usize) -> Option<String> {
