@@ -44,7 +44,7 @@ Always test script changes with dry-run first:
 - Keep the loop logic simple and predictable
 - All Claude interaction goes through stdin pipe (no interactive mode)
 - Exit codes: 0 = continue, 100 = all complete, other = error
-- The `--dangerously-skip-permissions` flag is required for autonomous operation
+- The `--dangerously-skip-permissions` flag is always used for autonomous operation
 
 ### Modifying prompt.md
 

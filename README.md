@@ -18,41 +18,57 @@ This replaces traditional PRD-based workflows with Beads issue tracking.
 - [Beads (bd)](https://github.com/...) installed
 - `jq` for JSON parsing
 
-## Setup
+## Installation
 
-1. **Create your issues first** using Claude in plan mode:
-   ```bash
-   # Open Claude in plan mode to design your issues
-   claude --permission-mode plan
-   
-   # Then create issues based on your planning session
-   bd create "Issue title" --type task --description "What needs to be done..."
-   ```
+```bash
+# Clone this repo
+git clone https://github.com/youruser/ralph-beads.git
 
-2. **Customize the prompt** by editing `prompt.md` with your specific instructions
+# Symlink to PATH
+ln -s /path/to/ralph-beads/ralph.sh /usr/local/bin/ralph
+```
 
-3. **Run the loop**:
-   ```bash
-   ./ralph.sh
-   ```
+## Setup (per project)
+
+```bash
+# 1. Initialize beads in your project (if not already)
+cd your-project
+bd init
+
+# 2. Initialize Ralph
+ralph --init
+
+# 3. Edit the prompt with your project-specific instructions
+$EDITOR .ralph/prompt.md
+
+# 4. Create your issues using Claude in plan mode
+claude --permission-mode plan
+bd create "Issue title" --type task --description "What needs to be done..."
+
+# 5. Run Ralph
+ralph
+```
 
 ## Usage
 
 ```bash
 # Run with default 10 iterations
-./ralph.sh
+ralph
 
 # Run with custom max iterations
-./ralph.sh 20
+ralph 20
 
 # Process only one issue
-./ralph.sh --once
+ralph --once
 
 # See what would happen without executing
-./ralph.sh --dry-run
+ralph --dry-run
 
 # Verbose output
-./ralph.sh --verbose
+ralph --verbose
+
+# Stream progress in real-time (run in a separate terminal)
+ralph --watch
 ```
 
 ## Workflow
@@ -77,12 +93,12 @@ bd create "Write API tests" --type task --description "..."
 Run the Ralph loop to process issues:
 
 ```bash
-./ralph.sh
+ralph
 ```
 
 The loop will:
 1. Find the next unblocked issue (`bd ready`)
-2. Build a prompt combining `prompt.md` + issue details
+2. Build a prompt combining `.ralph/prompt.md` + issue details
 3. Call Claude Code with `--dangerously-skip-permissions`
 4. Claude implements and closes the issue
 5. Check for completion signal (`<promise>COMPLETE</promise>`)
@@ -90,23 +106,40 @@ The loop will:
 
 ## Files
 
+**This repo (ralph-beads):**
 ```
 ralph-beads/
-├── ralph.sh           # The main Ralph loop script
-├── prompt.md          # Your custom prompt for Claude (you create this)
-├── progress.txt       # Log of Ralph's progress (auto-created)
-├── archive/           # Previous runs archived here
+├── ralph.sh           # The main Ralph loop script (install this)
+├── prompt.md          # Default prompt template (copied on --init)
 ├── CLAUDE.md          # Points to AGENTS.md
-├── AGENTS.md          # Guidelines for developing/maintaining this repo
-└── .beads/            # Beads database
+└── AGENTS.md          # Guidelines for developing/maintaining this repo
+```
+
+**Your project (after `ralph --init`):**
+```
+your-project/
+├── .ralph/
+│   ├── prompt.md      # Your project-specific instructions
+│   ├── progress.txt   # Log of Ralph's progress (auto-created)
+│   ├── archive/       # Previous runs archived here
+│   └── .last-run      # Run tracking
+└── ...
 ```
 
 ## Progress Tracking
 
 Ralph automatically:
-- Creates `progress.txt` to log each iteration
-- Archives previous runs to `archive/` when starting fresh
+- Creates `.ralph/progress.txt` to log each iteration
+- Archives previous runs to `.ralph/archive/` when starting fresh
 - Saves beads snapshots with each archive
+
+**Add to your project's `.gitignore`:**
+```gitignore
+# Ralph state files (keep prompt.md, ignore the rest)
+.ralph/progress.txt
+.ralph/archive/
+.ralph/.last-run
+```
 
 ## Completion Signal
 

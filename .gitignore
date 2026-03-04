@@ -1,24 +1,23 @@
-# Ralph runtime files
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Ralph runtime files (legacy root locations)
 progress.txt
 archive/
 .last-run
+.ralph-archive/
+.ralph-last-run
 
-# OS files
-.DS_Store
-Thumbs.db
+# Ralph runtime/state directory (current location)
+.ralph/progress.txt
+.ralph/archive/
+.ralph/.last-run
+.ralph/logs/
 
-# Editor files
-*.swp
-*.swo
-*~
-.vscode/
-.idea/
-
-# Logs
+# Logs and temp files
 *.log
 logs/
-
-# Temporary files
 tmp/
 temp/
 *.tmp
@@ -28,10 +27,19 @@ temp/
 .env.local
 .env.*.local
 
-# Node modules (if any tooling is added)
-node_modules/
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
 
-# Python (if any tooling is added)
+# OS files
+.DS_Store
+Thumbs.db
+
+# Optional tooling artifacts
+node_modules/
 __pycache__/
 *.py[cod]
 .venv/
