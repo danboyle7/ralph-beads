@@ -27,6 +27,12 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use serde_json::Value;
 
+mod cli;
+mod init;
+mod summary;
+
+use crate::cli::{Cli, Paths};
+
 const DEFAULT_PROMPT: &str = include_str!("../prompt.md");
 const MAX_LOG_LINES: usize = 200;
 const MAX_OUTPUT_LINES: usize = 800;
@@ -44,56 +50,6 @@ const ACCENT_PROGRESS: Color = Color::Rgb(110, 155, 255);
 const ACCENT_ACTIVITY: Color = Color::Rgb(255, 205, 106);
 const ACCENT_OUTPUT: Color = Color::Rgb(126, 234, 146);
 const ACCENT_WARN: Color = Color::Rgb(255, 175, 102);
-
-#[derive(Parser, Debug, Clone)]
-#[command(name = "ralph-rs", about = "Ralph Wiggum in Rust")]
-struct Cli {
-    #[arg(long)]
-    dry_run: bool,
-    #[arg(long)]
-    once: bool,
-    #[arg(long, value_name = "N")]
-    iterations: Option<usize>,
-    #[arg(short, long)]
-    verbose: bool,
-    #[arg(long)]
-    watch: bool,
-    #[arg(long)]
-    init: bool,
-    #[arg(long)]
-    summary: bool,
-    #[arg(long)]
-    plain: bool,
-    #[arg(long)]
-    debug: bool,
-}
-
-#[derive(Clone)]
-struct Paths {
-    project_dir: PathBuf,
-    ralph_dir: PathBuf,
-    prompt_file: PathBuf,
-    progress_file: PathBuf,
-    logs_dir: PathBuf,
-    archive_dir: PathBuf,
-    last_run_file: PathBuf,
-}
-
-impl Paths {
-    fn from_cwd() -> Result<Self> {
-        let project_dir = std::env::current_dir().context("failed to get current directory")?;
-        let ralph_dir = project_dir.join(".ralph");
-        Ok(Self {
-            project_dir,
-            prompt_file: ralph_dir.join("prompt.md"),
-            progress_file: ralph_dir.join("progress.txt"),
-            logs_dir: ralph_dir.join("logs"),
-            archive_dir: ralph_dir.join("archive"),
-            last_run_file: ralph_dir.join(".last-run"),
-            ralph_dir,
-        })
-    }
-}
 
 struct CleanupGuard {
     enabled: bool,
@@ -121,7 +77,6 @@ impl Drop for CleanupGuard {
 
 #[derive(Clone)]
 struct UiApp {
-    mode: UiMode,
     status: String,
     issue: String,
     issue_details: String,
@@ -141,16 +96,9 @@ struct UiApp {
     should_quit: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UiMode {
-    Run,
-    Watch,
-}
-
 impl UiApp {
-    fn new(mode: UiMode) -> Self {
+    fn new() -> Self {
         Self {
-            mode,
             status: "Starting".to_string(),
             issue: "-".to_string(),
             issue_details: "Issue details will appear here once an iteration begins.".to_string(),
@@ -259,13 +207,6 @@ fn usage_component_delta(previous: u64, current: u64) -> u64 {
     }
 }
 
-#[derive(Clone, Copy)]
-struct WatchLayout {
-    header: Rect,
-    progress: Rect,
-    footer: Rect,
-}
-
 fn push_line(lines: &mut VecDeque<String>, line: String, limit: usize) {
     for fragment in split_for_ui(&line) {
         lines.push_back(fragment);
@@ -328,219 +269,14 @@ fn main() -> Result<()> {
     let paths = Paths::from_cwd()?;
 
     if cli.init {
-        return init_project(&paths);
+        return init::init_project(&paths, DEFAULT_PROMPT);
     }
 
     if cli.summary {
-        return print_last_run_summary(&paths);
-    }
-
-    if cli.watch {
-        return run_watch_mode(&paths, cli.plain);
+        return summary::print_last_run_summary(&paths);
     }
 
     run_main_loop(cli, paths)
-}
-
-fn init_project(paths: &Paths) -> Result<()> {
-    if paths.ralph_dir.exists() {
-        bail!(".ralph already exists in {}", paths.project_dir.display());
-    }
-
-    fs::create_dir_all(&paths.archive_dir).context("failed to create .ralph/archive")?;
-    fs::create_dir_all(&paths.logs_dir).context("failed to create .ralph/logs")?;
-    fs::write(&paths.prompt_file, DEFAULT_PROMPT).context("failed to write default prompt")?;
-
-    println!("Created {}", paths.ralph_dir.display());
-    println!("Edit {}", paths.prompt_file.display());
-    Ok(())
-}
-
-fn run_watch_mode(paths: &Paths, plain: bool) -> Result<()> {
-    if plain || !io::stdout().is_terminal() {
-        watch_progress_plain(paths)
-    } else {
-        run_watch_tui(paths)
-    }
-}
-
-fn last_run_summary_lines(paths: &Paths) -> Result<Vec<String>> {
-    if !paths.progress_file.exists() {
-        bail!("No progress log found at {}", paths.progress_file.display());
-    }
-
-    let content = fs::read_to_string(&paths.progress_file)
-        .with_context(|| format!("failed to read {}", paths.progress_file.display()))?;
-
-    let mut run_id = String::from("unknown");
-    let mut started = String::from("unknown");
-    let mut max_iterations = String::from("unknown");
-    let mut completed = 0_usize;
-    let mut failed = 0_usize;
-    let mut processing = 0_usize;
-    let mut final_status = String::from("In progress");
-    let mut tail = VecDeque::new();
-
-    for line in content.lines() {
-        if let Some(value) = line.strip_prefix("Run ID: ") {
-            run_id = value.to_string();
-        } else if let Some(value) = line.strip_prefix("Started: ") {
-            started = value.to_string();
-        } else if let Some(value) = line.strip_prefix("Max Iterations: ") {
-            max_iterations = value.to_string();
-        }
-
-        if line.contains("Processing issue") {
-            processing += 1;
-        }
-        if line.contains("Completed issue") {
-            completed += 1;
-        }
-        if line.contains("FAILED issue") {
-            failed += 1;
-        }
-        if line.contains("COMPLETE:") || line.contains("STOPPED:") {
-            final_status = line.to_string();
-        }
-
-        tail.push_back(line.to_string());
-        while tail.len() > 8 {
-            tail.pop_front();
-        }
-    }
-
-    let mut lines = vec![
-        format!("Run ID: {run_id}"),
-        format!("Started: {started}"),
-        format!("Max Iterations: {max_iterations}"),
-        format!("Issues Started: {processing}"),
-        format!("Issues Completed: {completed}"),
-        format!("Issues Failed: {failed}"),
-        format!("Status: {final_status}"),
-        String::new(),
-        "Recent Log:".to_string(),
-    ];
-
-    for line in tail {
-        lines.push(line);
-    }
-
-    Ok(lines)
-}
-
-fn print_last_run_summary(paths: &Paths) -> Result<()> {
-    for line in last_run_summary_lines(paths)? {
-        println!("{line}");
-    }
-    Ok(())
-}
-
-fn watch_progress_plain(paths: &Paths) -> Result<()> {
-    println!(
-        "Watching {} (Ctrl+C to stop)",
-        paths.progress_file.display()
-    );
-
-    if paths.progress_file.exists() {
-        println!();
-        println!("Last Run Summary:");
-        for line in last_run_summary_lines(paths)? {
-            println!("{line}");
-        }
-        println!();
-        println!("Live Updates:");
-    } else {
-        println!("No previous run summary yet.");
-        println!("Waiting for progress log to be created...");
-    }
-
-    while !paths.progress_file.exists() {
-        thread::sleep(Duration::from_millis(500));
-    }
-
-    let mut last_seen = String::new();
-    loop {
-        let content = fs::read_to_string(&paths.progress_file).unwrap_or_default();
-        if content != last_seen {
-            let appended = if last_seen.is_empty() {
-                content.clone()
-            } else {
-                content
-                    .strip_prefix(&last_seen)
-                    .map(ToOwned::to_owned)
-                    .unwrap_or(content.clone())
-            };
-            print!("{appended}");
-            io::stdout().flush().ok();
-            last_seen = content;
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-}
-
-fn run_watch_tui(paths: &Paths) -> Result<()> {
-    let mut terminal = init_terminal()?;
-    let result = watch_tui_loop(paths, &mut terminal);
-    restore_terminal(&mut terminal)?;
-    result
-}
-
-fn watch_tui_loop(paths: &Paths, terminal: &mut DefaultTerminal) -> Result<()> {
-    let mut app = UiApp::new(UiMode::Watch);
-    app.status = format!("Watching {}", paths.progress_file.display());
-    if paths.progress_file.exists() {
-        app.summary = "Showing last run summary and live progress".to_string();
-        if let Ok(summary_lines) = last_run_summary_lines(paths) {
-            app.push_progress("== Last Run Summary ==");
-            for line in summary_lines {
-                app.push_progress(line);
-            }
-            app.push_progress(String::new());
-            app.push_progress("== Live Progress ==");
-        }
-    } else {
-        app.summary = "Waiting for progress file".to_string();
-        app.push_progress("No previous run summary yet.");
-        app.push_progress("Waiting for progress log to be created...");
-    }
-
-    let mut last_content = String::new();
-    loop {
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                CEvent::Key(key) => {
-                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
-                        app.should_quit = true;
-                    }
-                }
-                CEvent::Mouse(mouse) => {
-                    let area = terminal.size()?;
-                    handle_watch_mouse_scroll(&mut app, mouse, area.into());
-                }
-                _ => {}
-            }
-        }
-
-        if paths.progress_file.exists() {
-            let content = fs::read_to_string(&paths.progress_file).unwrap_or_default();
-            if content != last_content {
-                app.progress_lines.clear();
-                for line in content.lines() {
-                    app.push_progress(line.to_string());
-                }
-                app.summary = format!("{} lines loaded", content.lines().count());
-                last_content = content;
-            }
-        }
-
-        terminal.draw(|frame| draw_watch_ui(frame, &app))?;
-
-        if app.should_quit {
-            break;
-        }
-    }
-
-    Ok(())
 }
 
 fn run_main_loop(cli: Cli, paths: Paths) -> Result<()> {
@@ -920,7 +656,7 @@ fn live_tui_loop(
     graceful_quit: Arc<AtomicBool>,
     terminal: &mut DefaultTerminal,
 ) -> Result<()> {
-    let mut app = UiApp::new(UiMode::Run);
+    let mut app = UiApp::new();
     let tick_rate = Duration::from_millis(100);
     let mut last_redraw = Instant::now();
     let mut worker_stopped = false;
@@ -1021,23 +757,6 @@ fn run_layout(area: Rect) -> RunLayout {
         activity: bottom[0],
         output: bottom[1],
         footer: vertical[2],
-    }
-}
-
-fn watch_layout(area: Rect) -> WatchLayout {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    WatchLayout {
-        header: sections[0],
-        progress: sections[1],
-        footer: sections[2],
     }
 }
 
@@ -1179,106 +898,9 @@ fn handle_run_mouse_scroll(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
     }
 }
 
-fn handle_watch_mouse_scroll(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
-    if !matches!(
-        mouse.kind,
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-    ) {
-        return;
-    }
-
-    let layout = watch_layout(area);
-    if point_in_rect(layout.progress, mouse.column, mouse.row) {
-        apply_scroll_delta(
-            &mut app.progress_scroll,
-            wrapped_row_count_for_lines(&app.progress_lines, layout.progress),
-            layout.progress,
-            mouse.kind,
-        );
-    }
-}
-
-fn draw_watch_ui(frame: &mut Frame, app: &UiApp) {
-    let layout = watch_layout(frame.area());
-    let progress_scroll = resolve_scroll(
-        app.progress_scroll,
-        wrapped_row_count_for_lines(&app.progress_lines, layout.progress),
-        layout.progress,
-    );
-
-    let header = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "Ralph Progress Watch",
-            Style::default()
-                .fg(ACCENT_INFO)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            app.summary.clone(),
-            Style::default().fg(FG_MUTED),
-        )),
-        Line::from(Span::styled(
-            "q/Esc quit | Mouse wheel scrolls progress",
-            Style::default().fg(ACCENT_WARN),
-        )),
-    ])
-    .style(Style::default().fg(FG_MAIN).bg(BG_HEADER))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(ACCENT_INFO))
-            .title(Span::styled(
-                app.status.clone(),
-                Style::default()
-                    .fg(ACCENT_INFO)
-                    .add_modifier(Modifier::BOLD),
-            )),
-    );
-
-    let log = Paragraph::new(lines_from(&app.progress_lines))
-        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_PROGRESS))
-                .title(Span::styled(
-                    "Progress",
-                    Style::default()
-                        .fg(ACCENT_PROGRESS)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
-        .scroll((progress_scroll, 0))
-        .wrap(Wrap { trim: false });
-
-    let footer =
-        Paragraph::new("Controls: q/Esc quit, mouse wheel scrolls this panel, Ctrl+C force-exits")
-            .style(Style::default().fg(FG_MUTED).bg(BG_FOOTER))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(FG_MUTED))
-                    .title(Span::styled(
-                        "Controls",
-                        Style::default().fg(FG_MAIN).add_modifier(Modifier::BOLD),
-                    )),
-            );
-
-    frame.render_widget(
-        Block::default().style(Style::default().bg(BG_MAIN)),
-        frame.area(),
-    );
-    frame.render_widget(header, layout.header);
-    frame.render_widget(log, layout.progress);
-    frame.render_widget(footer, layout.footer);
-}
-
 fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
     let layout = run_layout(frame.area());
-    let title = match app.mode {
-        UiMode::Run => "Ralph TUI",
-        UiMode::Watch => "Ralph Watch",
-    };
+    let title = "Ralph";
 
     let spinner_frames = ["|", "/", "-", "\\"];
     let spinner_line = if let Some(label) = &app.spinner_label {
@@ -1830,12 +1452,34 @@ struct ClaudeRenderState {
     ends_with_newline: bool,
     streamed_text_block_indexes: HashSet<u64>,
     usage_tracker: UsageTracker,
+    tool_lifecycle: ToolLifecycleTracker,
 }
 
 #[derive(Default)]
 struct UsageTracker {
     by_message_id: HashMap<String, UsageTally>,
     by_actor: HashMap<String, UsageTally>,
+}
+
+#[derive(Default)]
+struct ToolLifecycleTracker {
+    by_tool_id: HashMap<String, ToolCallState>,
+    by_block_index: HashMap<u64, String>,
+}
+
+struct ToolCallState {
+    actor: String,
+    name: String,
+    started_at: Instant,
+    input_buffer: String,
+    input_value: Option<Value>,
+}
+
+struct CompletedToolCall {
+    actor: String,
+    name: String,
+    duration_ms: u128,
+    input: Option<Value>,
 }
 
 impl UsageTracker {
@@ -1849,6 +1493,158 @@ impl UsageTracker {
             return usage_delta_for_key(&mut self.by_message_id, message_id, sample);
         }
         usage_delta_for_key(&mut self.by_actor, actor_key, sample)
+    }
+}
+
+impl ToolLifecycleTracker {
+    fn observe_stream_tool_start(&mut self, root: &Value, event: &Value, started_at: Instant) {
+        let block = match event.get("content_block") {
+            Some(block) => block,
+            None => return,
+        };
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            return;
+        }
+
+        let index = match event.get("index").and_then(Value::as_u64) {
+            Some(index) => index,
+            None => return,
+        };
+        let tool_id = match block.get("id").and_then(Value::as_str) {
+            Some(id) => id.to_string(),
+            None => return,
+        };
+        let actor = actor_label(root);
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let input = block.get("input");
+
+        self.by_block_index.insert(index, tool_id.clone());
+        self.upsert_tool_call(&tool_id, actor, name, input, started_at);
+    }
+
+    fn observe_stream_tool_input_delta(&mut self, event: &Value) {
+        let index = match event.get("index").and_then(Value::as_u64) {
+            Some(index) => index,
+            None => return,
+        };
+        let partial = event
+            .get("delta")
+            .and_then(|delta| delta.get("partial_json"))
+            .and_then(Value::as_str);
+        let Some(partial) = partial else {
+            return;
+        };
+        let Some(tool_id) = self.by_block_index.get(&index) else {
+            return;
+        };
+        let Some(call) = self.by_tool_id.get_mut(tool_id) else {
+            return;
+        };
+        call.input_buffer.push_str(partial);
+    }
+
+    fn observe_stream_tool_block_stop(&mut self, event: &Value) {
+        let index = match event.get("index").and_then(Value::as_u64) {
+            Some(index) => index,
+            None => return,
+        };
+        let Some(tool_id) = self.by_block_index.remove(&index) else {
+            return;
+        };
+        let Some(call) = self.by_tool_id.get_mut(&tool_id) else {
+            return;
+        };
+        if call.input_value.is_none() && !call.input_buffer.trim().is_empty() {
+            if let Ok(input) = serde_json::from_str::<Value>(&call.input_buffer) {
+                call.input_value = Some(input);
+            }
+        }
+    }
+
+    fn observe_assistant_tool_uses(&mut self, root: &Value, started_at: Instant) {
+        let content = root
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array);
+        let Some(content) = content else {
+            return;
+        };
+
+        let actor = actor_label(root);
+        for item in content {
+            if item.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let Some(tool_id) = item.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let input = item.get("input");
+            self.upsert_tool_call(tool_id, actor.clone(), name, input, started_at);
+        }
+    }
+
+    fn complete_tool_call(
+        &mut self,
+        tool_use_id: &str,
+        completed_at: Instant,
+    ) -> Option<CompletedToolCall> {
+        let call = self.by_tool_id.remove(tool_use_id)?;
+        let duration_ms = completed_at.duration_since(call.started_at).as_millis();
+        Some(CompletedToolCall {
+            actor: call.actor,
+            name: call.name,
+            duration_ms,
+            input: call.input_value,
+        })
+    }
+
+    fn upsert_tool_call(
+        &mut self,
+        tool_id: &str,
+        actor: String,
+        name: String,
+        input: Option<&Value>,
+        started_at: Instant,
+    ) {
+        let entry = self
+            .by_tool_id
+            .entry(tool_id.to_string())
+            .or_insert_with(|| ToolCallState {
+                actor: actor.clone(),
+                name: name.clone(),
+                started_at,
+                input_buffer: String::new(),
+                input_value: None,
+            });
+
+        if entry.name == "unknown" {
+            entry.name = name;
+        }
+        if entry.actor == "claude" && actor != "claude" {
+            entry.actor = actor;
+        }
+        if let Some(input) = input {
+            if should_store_tool_input(input) {
+                entry.input_value = Some(input.clone());
+            }
+        }
+    }
+}
+
+fn should_store_tool_input(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
     }
 }
 
@@ -1944,6 +1740,10 @@ fn process_claude_line(
 
         if let Some(label) = spinner_label_for_event(&value, event) {
             send(ui_tx, UiEvent::Spinner(Some(label)));
+        }
+
+        for activity in semantic_activity_events(&value, event, render_state) {
+            send_activity(ui_tx, debug_logs, activity);
         }
 
         if let Some(activity) = activity_for_event(&value, event) {
@@ -2205,6 +2005,163 @@ fn extract_usage_delta(
         );
     }
 
+    None
+}
+
+fn semantic_activity_events(
+    root: &Value,
+    event: Option<&Value>,
+    render_state: &mut ClaudeRenderState,
+) -> Vec<String> {
+    let mut activities = Vec::new();
+    let now = Instant::now();
+    let root_type = root.get("type").and_then(Value::as_str);
+
+    if let Some(event) = event {
+        match event.get("type").and_then(Value::as_str) {
+            Some("content_block_start") => {
+                render_state
+                    .tool_lifecycle
+                    .observe_stream_tool_start(root, event, now);
+            }
+            Some("content_block_delta") => {
+                if event
+                    .get("delta")
+                    .and_then(|delta| delta.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("input_json_delta")
+                {
+                    render_state
+                        .tool_lifecycle
+                        .observe_stream_tool_input_delta(event);
+                }
+            }
+            Some("content_block_stop") => {
+                render_state
+                    .tool_lifecycle
+                    .observe_stream_tool_block_stop(event);
+            }
+            _ => {}
+        }
+    }
+
+    if root_type == Some("assistant") {
+        render_state
+            .tool_lifecycle
+            .observe_assistant_tool_uses(root, now);
+    }
+
+    if root_type != Some("user") {
+        return activities;
+    }
+
+    let content = root
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array);
+    let Some(content) = content else {
+        return activities;
+    };
+
+    for item in content {
+        if item.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+
+        let tool_use_id = item
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let is_error = item
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = if is_error { "error" } else { "ok" };
+        let content_text = item
+            .get("content")
+            .map(tool_result_content_as_text)
+            .unwrap_or_default();
+        let exit_code = extract_exit_code(&content_text);
+        let excerpt = if content_text.trim().is_empty() {
+            None
+        } else {
+            Some(compact_text(&content_text, 140))
+        };
+
+        let completed = render_state
+            .tool_lifecycle
+            .complete_tool_call(tool_use_id, now);
+        let actor = completed
+            .as_ref()
+            .map(|tool| tool.actor.clone())
+            .unwrap_or_else(|| actor_label(root));
+        let name = completed
+            .as_ref()
+            .map(|tool| tool.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let duration_ms = completed.as_ref().map(|tool| tool.duration_ms);
+        let input = completed
+            .as_ref()
+            .and_then(|tool| tool.input.as_ref())
+            .and_then(|value| compact_json(value, 140));
+
+        let mut parts = vec![
+            format!("{actor}: tool_done"),
+            format!("id={}", compact_text(tool_use_id, 16)),
+            format!("name={name}"),
+            format!("status={status}"),
+        ];
+        if let Some(duration_ms) = duration_ms {
+            parts.push(format!("duration_ms={duration_ms}"));
+        }
+        if let Some(exit_code) = exit_code {
+            parts.push(format!("exit_code={exit_code}"));
+        }
+        if let Some(input) = input {
+            parts.push(format!("input={input}"));
+        }
+        if let Some(excerpt) = excerpt {
+            parts.push(format!("result={excerpt}"));
+        }
+        activities.push(parts.join(" | "));
+    }
+
+    activities
+}
+
+fn tool_result_content_as_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => text.clone(),
+                Value::Object(map) => map
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| serde_json::to_string(item).unwrap_or_default()),
+                _ => serde_json::to_string(item).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn extract_exit_code(text: &str) -> Option<i32> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        for prefix in ["Exit code ", "Error: Exit code "] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                if let Some(value) = rest.split_whitespace().next() {
+                    if let Ok(code) = value.parse::<i32>() {
+                        return Some(code);
+                    }
+                }
+            }
+        }
+    }
     None
 }
 
