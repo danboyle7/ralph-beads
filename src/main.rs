@@ -1453,6 +1453,7 @@ struct ClaudeRenderState {
     streamed_text_block_indexes: HashSet<u64>,
     usage_tracker: UsageTracker,
     tool_lifecycle: ToolLifecycleTracker,
+    phase_tracker: RunPhaseTracker,
 }
 
 #[derive(Default)]
@@ -1480,6 +1481,32 @@ struct CompletedToolCall {
     name: String,
     duration_ms: u128,
     input: Option<Value>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunPhase {
+    Discover,
+    Implement,
+    Validate,
+    Finalize,
+}
+
+impl RunPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            RunPhase::Discover => "discover",
+            RunPhase::Implement => "implement",
+            RunPhase::Validate => "validate",
+            RunPhase::Finalize => "finalize",
+        }
+    }
+}
+
+#[derive(Default)]
+struct RunPhaseTracker {
+    current: Option<RunPhase>,
+    validation_attempts: HashMap<String, usize>,
+    pending_validation_error: Option<String>,
 }
 
 impl UsageTracker {
@@ -1645,6 +1672,35 @@ fn should_store_tool_input(value: &Value) -> bool {
         Value::Null => false,
         Value::Object(map) => !map.is_empty(),
         _ => true,
+    }
+}
+
+impl RunPhaseTracker {
+    fn transition_to(&mut self, next: RunPhase) -> Option<RunPhase> {
+        if self.current == Some(next) {
+            None
+        } else {
+            self.current = Some(next);
+            Some(next)
+        }
+    }
+
+    fn next_validation_attempt(&mut self, key: &str) -> usize {
+        let attempt = self.validation_attempts.entry(key.to_string()).or_insert(0);
+        *attempt += 1;
+        *attempt
+    }
+
+    fn remember_validation_error(&mut self, excerpt: Option<&str>) {
+        self.pending_validation_error = excerpt.map(ToOwned::to_owned);
+    }
+
+    fn clear_validation_error(&mut self) {
+        self.pending_validation_error = None;
+    }
+
+    fn take_validation_error(&mut self) -> Option<String> {
+        self.pending_validation_error.take()
     }
 }
 
@@ -2100,10 +2156,35 @@ fn semantic_activity_events(
             .map(|tool| tool.name.clone())
             .unwrap_or_else(|| "unknown".to_string());
         let duration_ms = completed.as_ref().map(|tool| tool.duration_ms);
-        let input = completed
+        let input_value = completed.as_ref().and_then(|tool| tool.input.as_ref());
+        let input = input_value
             .as_ref()
-            .and_then(|tool| tool.input.as_ref())
             .and_then(|value| compact_json(value, 140));
+
+        if let Some(phase) = phase_for_tool(&name, input_value) {
+            if let Some(changed) = render_state.phase_tracker.transition_to(phase) {
+                activities.push(format!("{actor}: phase_change | to={}", changed.as_str()));
+            }
+
+            if phase == RunPhase::Implement {
+                if let Some(cause) = render_state.phase_tracker.take_validation_error() {
+                    activities.push(format!(
+                        "{actor}: fix_cycle_started | cause={}",
+                        compact_text(&cause, 120)
+                    ));
+                }
+            }
+        }
+
+        let validation_key = validation_key_for_tool(&name, input_value);
+        let mut validation_attempt = None;
+        if let Some(key) = validation_key.as_deref() {
+            let attempt = render_state.phase_tracker.next_validation_attempt(key);
+            validation_attempt = Some(attempt);
+            activities.push(format!(
+                "{actor}: validation_attempt | check={key} | attempt={attempt}"
+            ));
+        }
 
         let mut parts = vec![
             format!("{actor}: tool_done"),
@@ -2114,16 +2195,43 @@ fn semantic_activity_events(
         if let Some(duration_ms) = duration_ms {
             parts.push(format!("duration_ms={duration_ms}"));
         }
+        if let Some(attempt) = validation_attempt {
+            parts.push(format!("attempt={attempt}"));
+        }
         if let Some(exit_code) = exit_code {
             parts.push(format!("exit_code={exit_code}"));
         }
         if let Some(input) = input {
             parts.push(format!("input={input}"));
         }
-        if let Some(excerpt) = excerpt {
+        if let Some(excerpt) = excerpt.as_deref() {
             parts.push(format!("result={excerpt}"));
         }
         activities.push(parts.join(" | "));
+
+        if validation_attempt.is_some() {
+            if is_error {
+                render_state
+                    .phase_tracker
+                    .remember_validation_error(excerpt.as_deref());
+            } else {
+                render_state.phase_tracker.clear_validation_error();
+            }
+            if let Some(key) = validation_key.as_deref() {
+                let mut result_parts = vec![
+                    format!("{actor}: validation_result"),
+                    format!("check={key}"),
+                    format!("status={status}"),
+                ];
+                if let Some(exit_code) = exit_code {
+                    result_parts.push(format!("exit_code={exit_code}"));
+                }
+                if let Some(excerpt) = excerpt.as_deref() {
+                    result_parts.push(format!("reason={excerpt}"));
+                }
+                activities.push(result_parts.join(" | "));
+            }
+        }
     }
 
     activities
@@ -2163,6 +2271,73 @@ fn extract_exit_code(text: &str) -> Option<i32> {
         }
     }
     None
+}
+
+fn phase_for_tool(name: &str, input: Option<&Value>) -> Option<RunPhase> {
+    match name {
+        "Edit" | "Write" => return Some(RunPhase::Implement),
+        "Read" | "Agent" | "Glob" | "Grep" => return Some(RunPhase::Discover),
+        _ => {}
+    }
+
+    if name != "Bash" {
+        return None;
+    }
+
+    let command = bash_command_from_input(input)?.to_lowercase();
+    if command.contains("git add")
+        || command.contains("git commit")
+        || command.contains("bd close")
+        || command.contains("bd list --status open")
+    {
+        return Some(RunPhase::Finalize);
+    }
+
+    if command.contains("cargo ")
+        || command.contains("pytest")
+        || command.contains("clippy")
+        || command.contains("fmt --check")
+        || command.contains("cargo test")
+    {
+        return Some(RunPhase::Validate);
+    }
+
+    Some(RunPhase::Discover)
+}
+
+fn validation_key_for_tool(name: &str, input: Option<&Value>) -> Option<String> {
+    if name != "Bash" {
+        return None;
+    }
+
+    let command = bash_command_from_input(input)?.to_lowercase();
+    if command.contains("cargo fmt --all --check")
+        && command.contains("cargo clippy")
+        && command.contains("cargo test")
+    {
+        return Some("full_validation".to_string());
+    }
+    if command.contains("cargo clippy") {
+        return Some("clippy".to_string());
+    }
+    if command.contains("cargo test") {
+        return Some("tests".to_string());
+    }
+    if command.contains("cargo fmt --all --check") || command.contains("cargo fmt") {
+        return Some("format".to_string());
+    }
+    if command.contains("cargo build") {
+        return Some("build".to_string());
+    }
+
+    None
+}
+
+fn bash_command_from_input(input: Option<&Value>) -> Option<&str> {
+    input?
+        .as_object()
+        .and_then(|object| object.get("command"))
+        .and_then(Value::as_str)
 }
 
 fn compact_text(value: &str, max_chars: usize) -> String {
