@@ -653,6 +653,15 @@ impl DebugLogs {
         let _ = writeln!(self.semantic_file, "{record}");
     }
 
+    fn log_semantic_value(&mut self, value: &Value) {
+        let timestamp = Local::now().to_rfc3339();
+        let record = json!({
+            "timestamp": timestamp,
+            "event": value,
+        });
+        let _ = writeln!(self.semantic_file, "{record}");
+    }
+
     fn log_report_line(&mut self, line: &str) {
         let _ = writeln!(self.report_file, "{line}");
     }
@@ -1571,6 +1580,7 @@ struct ValidationAttemptRecord {
 struct SemanticEventBundle {
     activities: Vec<String>,
     output_lines: Vec<String>,
+    machine_records: Vec<Value>,
 }
 
 impl UsageTracker {
@@ -1942,6 +1952,12 @@ fn process_claude_line(
         }
 
         let semantic_events = semantic_activity_events(&value, event, render_state);
+
+        if let Some(logs) = debug_logs.as_mut() {
+            for record in &semantic_events.machine_records {
+                logs.log_semantic_value(record);
+            }
+        }
 
         for activity in semantic_events.activities {
             if let Some(logs) = debug_logs.as_mut() {
@@ -2326,7 +2342,8 @@ fn semantic_activity_events(
         let input_value = completed.as_ref().and_then(|tool| tool.input.as_ref());
         let input = input_value.and_then(|value| compact_json(value, 140));
 
-        if let Some(phase) = phase_for_tool(&name, input_value) {
+        let phase = phase_for_tool(&name, input_value);
+        if let Some(phase) = phase {
             if let Some(changed) = render_state.phase_tracker.transition_to(phase) {
                 bundle
                     .activities
@@ -2375,6 +2392,21 @@ fn semantic_activity_events(
             parts.push(format!("result={excerpt}"));
         }
         bundle.activities.push(parts.join(" | "));
+        bundle.machine_records.push(json!({
+            "type": "tool_done",
+            "actor": actor.clone(),
+            "tool_use_id": tool_use_id,
+            "tool_use_id_short": compact_text(tool_use_id, 16),
+            "name": name.clone(),
+            "status": status,
+            "phase": phase.map(|value| value.as_str()),
+            "duration_ms": duration_ms,
+            "exit_code": exit_code,
+            "validation_check": validation_key.clone(),
+            "validation_attempt": validation_attempt,
+            "input": input_value,
+            "result_excerpt": excerpt.as_deref(),
+        }));
 
         if name == "Edit" || name == "Write" {
             if let Some(file_path) = tool_file_path_from_input(input_value) {
