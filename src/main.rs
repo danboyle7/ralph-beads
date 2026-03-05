@@ -84,6 +84,9 @@ struct UiApp {
     progress_lines: VecDeque<String>,
     output_lines: VecDeque<String>,
     activity_lines: VecDeque<String>,
+    timeline_lines: VecDeque<String>,
+    validation_lines: VecDeque<String>,
+    subagent_lines: VecDeque<String>,
     footer: String,
     spinner_label: Option<String>,
     spinner_frame: usize,
@@ -93,6 +96,9 @@ struct UiApp {
     issue_details_scroll: u16,
     activity_scroll: u16,
     output_scroll: u16,
+    timeline_scroll: u16,
+    validation_scroll: u16,
+    subagent_scroll: u16,
     should_quit: bool,
 }
 
@@ -106,6 +112,9 @@ impl UiApp {
             progress_lines: VecDeque::new(),
             output_lines: VecDeque::new(),
             activity_lines: VecDeque::new(),
+            timeline_lines: VecDeque::new(),
+            validation_lines: VecDeque::new(),
+            subagent_lines: VecDeque::new(),
             footer:
                 "Controls: q/Esc quit now, Shift+Q stop after current iteration, mouse wheel scrolls panel"
                     .to_string(),
@@ -117,6 +126,9 @@ impl UiApp {
             issue_details_scroll: 0,
             activity_scroll: AUTO_SCROLL,
             output_scroll: AUTO_SCROLL,
+            timeline_scroll: AUTO_SCROLL,
+            validation_scroll: AUTO_SCROLL,
+            subagent_scroll: AUTO_SCROLL,
             should_quit: false,
         }
     }
@@ -136,6 +148,18 @@ impl UiApp {
     fn push_activity(&mut self, line: impl Into<String>) {
         push_line(&mut self.activity_lines, line.into(), MAX_ACTIVITY_LINES);
     }
+
+    fn push_timeline(&mut self, line: impl Into<String>) {
+        push_line(&mut self.timeline_lines, line.into(), MAX_ACTIVITY_LINES);
+    }
+
+    fn push_validation(&mut self, line: impl Into<String>) {
+        push_line(&mut self.validation_lines, line.into(), MAX_ACTIVITY_LINES);
+    }
+
+    fn push_subagent(&mut self, line: impl Into<String>) {
+        push_line(&mut self.subagent_lines, line.into(), MAX_ACTIVITY_LINES);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -144,6 +168,9 @@ enum ScrollTarget {
     IssueDetails,
     Activity,
     Output,
+    Timeline,
+    Validation,
+    Subagent,
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +180,9 @@ struct RunLayout {
     issue_details: Rect,
     activity: Rect,
     output: Rect,
+    timeline: Rect,
+    validation: Rect,
+    subagent: Rect,
     footer: Rect,
 }
 
@@ -260,6 +290,9 @@ enum UiEvent {
     Output(String),
     OutputChunk(String),
     Activity(String),
+    Timeline(String),
+    Validation(String),
+    Subagent(String),
     Spinner(Option<String>),
     Stop(String),
 }
@@ -435,6 +468,9 @@ fn worker_main(
         };
 
         send(&ui_tx, UiEvent::Issue(issue_id.clone()));
+        if let Some(logs) = debug_logs.as_mut() {
+            logs.set_iteration_context(iteration, &issue_id);
+        }
         log_progress(
             &paths,
             &ui_tx,
@@ -554,6 +590,10 @@ fn format_run_stats(
 }
 
 struct DebugLogs {
+    run_id: String,
+    current_iteration: usize,
+    current_issue: String,
+    semantic_sequence: u64,
     run_dir_path: PathBuf,
     raw_events_path: PathBuf,
     activity_path: PathBuf,
@@ -614,6 +654,10 @@ impl DebugLogs {
             .context("failed to initialize Claude markdown output log")?;
 
         Ok(Self {
+            run_id: run_id.to_string(),
+            current_iteration: 0,
+            current_issue: String::new(),
+            semantic_sequence: 0,
             run_dir_path,
             raw_events_path,
             activity_path,
@@ -626,6 +670,11 @@ impl DebugLogs {
             semantic_file,
             report_file,
         })
+    }
+
+    fn set_iteration_context(&mut self, iteration: usize, issue_id: &str) {
+        self.current_iteration = iteration;
+        self.current_issue = issue_id.to_string();
     }
 
     fn log_raw_event(&mut self, is_stderr: bool, line: &str) {
@@ -655,8 +704,20 @@ impl DebugLogs {
 
     fn log_semantic_value(&mut self, value: &Value) {
         let timestamp = Local::now().to_rfc3339();
+        self.semantic_sequence = self.semantic_sequence.saturating_add(1);
+        let event_type = value.get("type").and_then(Value::as_str).unwrap_or("event");
+        let parent_tool_use_id = value
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         let record = json!({
             "timestamp": timestamp,
+            "event_id": format!("{}-{:06}", self.run_id, self.semantic_sequence),
+            "run_id": self.run_id,
+            "iteration": self.current_iteration,
+            "issue_id": self.current_issue,
+            "event_type": event_type,
+            "parent_tool_use_id": parent_tool_use_id,
             "event": value,
         });
         let _ = writeln!(self.semantic_file, "{record}");
@@ -682,6 +743,9 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
                 io::stdout().flush().ok();
             }
             UiEvent::Activity(line) => eprintln!("[claude] {line}"),
+            UiEvent::Timeline(line) => eprintln!("[timeline] {line}"),
+            UiEvent::Validation(line) => eprintln!("[validation] {line}"),
+            UiEvent::Subagent(line) => eprintln!("[subagent] {line}"),
             UiEvent::Spinner(Some(label)) => eprintln!("[claude] {label}"),
             UiEvent::Spinner(None) => {}
             UiEvent::Stop(line) => {
@@ -722,6 +786,9 @@ fn live_tui_loop(
                 UiEvent::Output(line) => app.push_output(line),
                 UiEvent::OutputChunk(chunk) => app.append_output_chunk(chunk),
                 UiEvent::Activity(line) => app.push_activity(line),
+                UiEvent::Timeline(line) => app.push_timeline(line),
+                UiEvent::Validation(line) => app.push_validation(line),
+                UiEvent::Subagent(line) => app.push_subagent(line),
                 UiEvent::Spinner(label) => app.spinner_label = label,
                 UiEvent::Stop(line) => {
                     app.status = "Finished".to_string();
@@ -796,8 +863,20 @@ fn run_layout(area: Rect) -> RunLayout {
 
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(vertical[1]);
+    let insights = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(bottom[2]);
 
     RunLayout {
         header: upper_left[0],
@@ -805,6 +884,9 @@ fn run_layout(area: Rect) -> RunLayout {
         issue_details: upper[1],
         activity: bottom[0],
         output: bottom[1],
+        timeline: insights[0],
+        validation: insights[1],
+        subagent: insights[2],
         footer: vertical[2],
     }
 }
@@ -903,6 +985,12 @@ fn run_scroll_target(layout: RunLayout, column: u16, row: u16) -> Option<ScrollT
         Some(ScrollTarget::Activity)
     } else if point_in_rect(layout.output, column, row) {
         Some(ScrollTarget::Output)
+    } else if point_in_rect(layout.timeline, column, row) {
+        Some(ScrollTarget::Timeline)
+    } else if point_in_rect(layout.validation, column, row) {
+        Some(ScrollTarget::Validation)
+    } else if point_in_rect(layout.subagent, column, row) {
+        Some(ScrollTarget::Subagent)
     } else {
         None
     }
@@ -941,6 +1029,24 @@ fn handle_run_mouse_scroll(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
             &mut app.output_scroll,
             wrapped_row_count_for_lines(&app.output_lines, layout.output),
             layout.output,
+            mouse.kind,
+        ),
+        Some(ScrollTarget::Timeline) => apply_scroll_delta(
+            &mut app.timeline_scroll,
+            wrapped_row_count_for_lines(&app.timeline_lines, layout.timeline),
+            layout.timeline,
+            mouse.kind,
+        ),
+        Some(ScrollTarget::Validation) => apply_scroll_delta(
+            &mut app.validation_scroll,
+            wrapped_row_count_for_lines(&app.validation_lines, layout.validation),
+            layout.validation,
+            mouse.kind,
+        ),
+        Some(ScrollTarget::Subagent) => apply_scroll_delta(
+            &mut app.subagent_scroll,
+            wrapped_row_count_for_lines(&app.subagent_lines, layout.subagent),
+            layout.subagent,
             mouse.kind,
         ),
         None => {}
@@ -1074,7 +1180,7 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ACCENT_OUTPUT))
                 .title(Span::styled(
-                    "Claude Output",
+                    "Claude Output (Narrative)",
                     Style::default()
                         .fg(ACCENT_OUTPUT)
                         .add_modifier(Modifier::BOLD),
@@ -1085,6 +1191,75 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
                 app.output_scroll,
                 wrapped_row_count_for_lines(&app.output_lines, layout.output),
                 layout.output,
+            ),
+            0,
+        ))
+        .wrap(Wrap { trim: false });
+
+    let timeline = Paragraph::new(lines_from(&app.timeline_lines))
+        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT_INFO))
+                .title(Span::styled(
+                    "Timeline",
+                    Style::default()
+                        .fg(ACCENT_INFO)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
+        .scroll((
+            resolve_scroll(
+                app.timeline_scroll,
+                wrapped_row_count_for_lines(&app.timeline_lines, layout.timeline),
+                layout.timeline,
+            ),
+            0,
+        ))
+        .wrap(Wrap { trim: false });
+
+    let validation = Paragraph::new(lines_from(&app.validation_lines))
+        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT_WARN))
+                .title(Span::styled(
+                    "Validation",
+                    Style::default()
+                        .fg(ACCENT_WARN)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
+        .scroll((
+            resolve_scroll(
+                app.validation_scroll,
+                wrapped_row_count_for_lines(&app.validation_lines, layout.validation),
+                layout.validation,
+            ),
+            0,
+        ))
+        .wrap(Wrap { trim: false });
+
+    let subagent = Paragraph::new(lines_from(&app.subagent_lines))
+        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT_ACTIVITY))
+                .title(Span::styled(
+                    "Subagents",
+                    Style::default()
+                        .fg(ACCENT_ACTIVITY)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
+        .scroll((
+            resolve_scroll(
+                app.subagent_scroll,
+                wrapped_row_count_for_lines(&app.subagent_lines, layout.subagent),
+                layout.subagent,
             ),
             0,
         ))
@@ -1111,6 +1286,9 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
     frame.render_widget(issue_details, layout.issue_details);
     frame.render_widget(activity, layout.activity);
     frame.render_widget(output, layout.output);
+    frame.render_widget(timeline, layout.timeline);
+    frame.render_widget(validation, layout.validation);
+    frame.render_widget(subagent, layout.subagent);
     frame.render_widget(footer, layout.footer);
 }
 
@@ -1580,6 +1758,9 @@ struct ValidationAttemptRecord {
 struct SemanticEventBundle {
     activities: Vec<String>,
     output_lines: Vec<String>,
+    timeline_lines: Vec<String>,
+    validation_lines: Vec<String>,
+    subagent_lines: Vec<String>,
     machine_records: Vec<Value>,
 }
 
@@ -1648,22 +1829,23 @@ impl ToolLifecycleTracker {
         call.input_buffer.push_str(partial);
     }
 
-    fn observe_stream_tool_block_stop(&mut self, event: &Value) {
+    fn observe_stream_tool_block_stop(&mut self, event: &Value) -> Option<(String, Option<Value>)> {
         let index = match event.get("index").and_then(Value::as_u64) {
             Some(index) => index,
-            None => return,
+            None => return None,
         };
         let Some(tool_id) = self.by_block_index.remove(&index) else {
-            return;
+            return None;
         };
         let Some(call) = self.by_tool_id.get_mut(&tool_id) else {
-            return;
+            return None;
         };
         if call.input_value.is_none() && !call.input_buffer.trim().is_empty() {
             if let Ok(input) = serde_json::from_str::<Value>(&call.input_buffer) {
                 call.input_value = Some(input);
             }
         }
+        Some((tool_id, call.input_value.clone()))
     }
 
     fn observe_assistant_tool_uses(&mut self, root: &Value, started_at: Instant) {
@@ -1978,6 +2160,27 @@ fn process_claude_line(
             render_state.ends_with_newline = true;
         }
 
+        for line in semantic_events.timeline_lines {
+            if let Some(logs) = debug_logs.as_mut() {
+                logs.log_semantic_line("timeline", &line);
+            }
+            send(ui_tx, UiEvent::Timeline(line));
+        }
+
+        for line in semantic_events.validation_lines {
+            if let Some(logs) = debug_logs.as_mut() {
+                logs.log_semantic_line("validation", &line);
+            }
+            send(ui_tx, UiEvent::Validation(line));
+        }
+
+        for line in semantic_events.subagent_lines {
+            if let Some(logs) = debug_logs.as_mut() {
+                logs.log_semantic_line("subagent", &line);
+            }
+            send(ui_tx, UiEvent::Subagent(line));
+        }
+
         if let Some(activity) = activity_for_event(&value, event) {
             send_activity(ui_tx, debug_logs, activity);
         }
@@ -2252,6 +2455,32 @@ fn semantic_activity_events(
     if let Some(event) = event {
         match event.get("type").and_then(Value::as_str) {
             Some("content_block_start") => {
+                if let Some(block) = event.get("content_block") {
+                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                        let tool_use_id =
+                            block.get("id").and_then(Value::as_str).unwrap_or("unknown");
+                        let tool_name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let actor = actor_label(root);
+                        bundle.timeline_lines.push(format!(
+                            "{} | tool_started {} ({})",
+                            actor,
+                            compact_text(tool_use_id, 16),
+                            tool_name
+                        ));
+                        bundle.machine_records.push(json!({
+                            "type": "tool_started",
+                            "actor": actor,
+                            "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                            "tool_use_id": tool_use_id,
+                            "tool_use_id_short": compact_text(tool_use_id, 16),
+                            "name": tool_name,
+                            "input": block.get("input"),
+                        }));
+                    }
+                }
                 render_state
                     .tool_lifecycle
                     .observe_stream_tool_start(root, event, now);
@@ -2269,9 +2498,17 @@ fn semantic_activity_events(
                 }
             }
             Some("content_block_stop") => {
-                render_state
+                if let Some((tool_id, input)) = render_state
                     .tool_lifecycle
-                    .observe_stream_tool_block_stop(event);
+                    .observe_stream_tool_block_stop(event)
+                {
+                    bundle.machine_records.push(json!({
+                        "type": "tool_input_finalized",
+                        "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                        "tool_use_id": tool_id,
+                        "input": input,
+                    }));
+                }
             }
             _ => {}
         }
@@ -2288,6 +2525,34 @@ fn semantic_activity_events(
         render_state
             .tool_lifecycle
             .observe_assistant_tool_uses(root, now);
+        if let Some(parent_tool_use_id) = root.get("parent_tool_use_id").and_then(Value::as_str) {
+            let preview = extract_text_blocks(
+                root.get("message")
+                    .and_then(|message| message.get("content"))
+                    .or_else(|| root.get("content")),
+            )
+            .map(|text| compact_text(&text, 120))
+            .unwrap_or_else(|| "working...".to_string());
+            let model = root
+                .get("message")
+                .and_then(|message| message.get("model"))
+                .or_else(|| root.get("model"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let line = format!(
+                "{} | model={} | {}",
+                compact_text(parent_tool_use_id, 16),
+                model,
+                preview
+            );
+            bundle.subagent_lines.push(line.clone());
+            bundle.machine_records.push(json!({
+                "type": "subagent_update",
+                "parent_tool_use_id": parent_tool_use_id,
+                "model": model,
+                "preview": preview,
+            }));
+        }
     }
 
     if root_type != Some("user") {
@@ -2348,6 +2613,16 @@ fn semantic_activity_events(
                 bundle
                     .activities
                     .push(format!("{actor}: phase_change | to={}", changed.as_str()));
+                bundle
+                    .timeline_lines
+                    .push(format!("phase_started | {}", changed.as_str()));
+                bundle.machine_records.push(json!({
+                    "type": "phase_started",
+                    "actor": actor,
+                    "phase": changed.as_str(),
+                    "trigger_tool_use_id": tool_use_id,
+                    "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                }));
             }
 
             if phase == RunPhase::Implement {
@@ -2356,6 +2631,28 @@ fn semantic_activity_events(
                         "{actor}: fix_cycle_started | cause={}",
                         compact_text(&cause, 120)
                     ));
+                    bundle
+                        .timeline_lines
+                        .push(format!("fix_applied | cause={}", compact_text(&cause, 80)));
+                    bundle.output_lines.push(format!(
+                        "Decision | Validation failed with '{}' so applying focused code fixes before retrying.",
+                        compact_text(&cause, 80)
+                    ));
+                    bundle.machine_records.push(json!({
+                        "type": "fix_applied",
+                        "actor": actor,
+                        "cause": cause,
+                        "trigger_tool_use_id": tool_use_id,
+                        "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                    }));
+                    bundle.machine_records.push(json!({
+                        "type": "decision_log",
+                        "actor": actor,
+                        "decision": "switch_to_implement_for_fix",
+                        "because": compact_text(&cause, 120),
+                        "trigger_tool_use_id": tool_use_id,
+                        "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                    }));
                 }
             }
         }
@@ -2368,6 +2665,19 @@ fn semantic_activity_events(
             bundle.activities.push(format!(
                 "{actor}: validation_attempt | check={key} | attempt={attempt}"
             ));
+            bundle
+                .validation_lines
+                .push(format!("{key} | attempt {attempt} | started"));
+            if attempt > 1 {
+                bundle.machine_records.push(json!({
+                    "type": "retry_started",
+                    "actor": actor,
+                    "check": key,
+                    "attempt": attempt,
+                    "trigger_tool_use_id": tool_use_id,
+                    "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                }));
+            }
         }
 
         let mut parts = vec![
@@ -2392,9 +2702,20 @@ fn semantic_activity_events(
             parts.push(format!("result={excerpt}"));
         }
         bundle.activities.push(parts.join(" | "));
+        if let Some(duration_ms) = duration_ms {
+            if duration_ms >= 2000 {
+                bundle.timeline_lines.push(format!(
+                    "tool_finished | {} | {}ms | {}",
+                    name,
+                    duration_ms,
+                    compact_text(tool_use_id, 16)
+                ));
+            }
+        }
         bundle.machine_records.push(json!({
-            "type": "tool_done",
+            "type": "tool_finished",
             "actor": actor.clone(),
+            "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
             "tool_use_id": tool_use_id,
             "tool_use_id_short": compact_text(tool_use_id, 16),
             "name": name.clone(),
@@ -2407,6 +2728,23 @@ fn semantic_activity_events(
             "input": input_value,
             "result_excerpt": excerpt.as_deref(),
         }));
+        if name == "Agent" {
+            let subagent_summary = excerpt
+                .as_deref()
+                .map(|text| compact_text(text, 120))
+                .unwrap_or_else(|| "no textual summary".to_string());
+            bundle.subagent_lines.push(format!(
+                "main_agent_used_subagent | {} | {}",
+                compact_text(tool_use_id, 16),
+                subagent_summary
+            ));
+            bundle.machine_records.push(json!({
+                "type": "subagent_result_used",
+                "actor": actor,
+                "tool_use_id": tool_use_id,
+                "summary": subagent_summary,
+            }));
+        }
 
         if name == "Edit" || name == "Write" {
             if let Some(file_path) = tool_file_path_from_input(input_value) {
@@ -2446,6 +2784,13 @@ fn semantic_activity_events(
                     result_parts.push(format!("reason={excerpt}"));
                 }
                 bundle.activities.push(result_parts.join(" | "));
+                bundle.validation_lines.push(format!(
+                    "{key} | attempt {} | {status}{}",
+                    validation_attempt.unwrap_or(1),
+                    exit_code
+                        .map(|code| format!(" | exit {code}"))
+                        .unwrap_or_default()
+                ));
                 render_state
                     .output_narrative
                     .record_validation_attempt(ValidationAttemptRecord {
@@ -2463,6 +2808,17 @@ fn semantic_activity_events(
                         .map(|code| format!(" (exit {code})"))
                         .unwrap_or_default()
                 ));
+                bundle.machine_records.push(json!({
+                    "type": if status == "ok" { "validation_passed" } else { "validation_failed" },
+                    "actor": actor,
+                    "parent_tool_use_id": root.get("parent_tool_use_id").and_then(Value::as_str),
+                    "tool_use_id": tool_use_id,
+                    "check": key,
+                    "attempt": validation_attempt.unwrap_or(1),
+                    "status": status,
+                    "exit_code": exit_code,
+                    "reason": excerpt,
+                }));
             }
         }
     }
