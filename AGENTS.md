@@ -6,27 +6,33 @@ This repo contains **ralph-beads**, a tool for running autonomous Claude Code lo
 
 | File | Purpose |
 |------|---------|
-| `prompt.md` | Instructions for the **Ralph agent** when it works on a target project |
+| `ralph.md` + `issue.md` | Shared and issue-mode instructions for the **Ralph agent** |
 | `AGENTS.md` (this file) | Instructions for **you** when modifying this tool |
 
-Do not confuse these. Changes to `prompt.md` affect how Ralph behaves in target projects. Changes here guide development of the tool itself.
+Do not confuse these. Changes to agent prompt files affect how Ralph behaves in target projects. Changes here guide development of the tool itself.
 
 ## Architecture
 
 ```
 src/main.rs       # Rust CLI entrypoint
 src/cli.rs        # CLI args and path layout
-src/init.rs       # `ralph --init` bootstrap logic
-src/summary.rs    # `ralph --summary` rendering
-prompt.md         # Agent instructions (injected into each Claude call)
-progress.txt      # Runtime log (auto-generated, gitignored)
-archive/          # Previous run archives (auto-generated)
+src/init.rs       # `ralph init` bootstrap logic
+src/summary.rs    # `ralph summary` rendering
+ralph.md          # Shared meta prompt template
+issue.md          # Issue-mode prompt template
+prompt.md         # Legacy compatibility prompt template
+cleanup.md        # Default cleanup pass template
+quality-check.md  # Default reflection quality template
+code-review-check.md # Default reflection code-review template
+validation-check.md # Default reflection validation template
+.ralph/progress.txt # Runtime log (in target project, auto-generated)
+.ralph/archive/   # Previous run archives (in target project, auto-generated)
 ```
 
 ### How It Works
 
 1. `ralph` calls `bd ready` to get the next issue
-2. Builds a prompt from `prompt.md` + issue details
+2. Builds prompts from `.ralph/prompts/*.md` + runtime context
 3. Pipes to `claude --dangerously-skip-permissions --print`
 4. Checks for `<promise>COMPLETE</promise>` signal
 5. Repeats until done or max iterations reached
@@ -49,9 +55,9 @@ cargo run --bin ralph -- --dry-run --verbose
 - Exit codes: 0 = continue, 100 = all complete, other = error
 - The `--dangerously-skip-permissions` flag is always used for autonomous operation
 
-### Modifying prompt.md
+### Modifying prompt templates
 
-- This is the agent's "brain" - changes affect all target projects
+- These files are the agent's "brain" - changes affect all target projects
 - Keep instructions clear and unambiguous
 - The `bd` command reference section is critical - keep it accurate
 - Test prompt changes on a throwaway repo first
@@ -79,10 +85,10 @@ cargo run --bin ralph -- --dry-run --verbose
 
 ### Changing the prompt format
 
-The prompt is built in `build_prompt()`. It concatenates:
-1. Base prompt from `prompt.md`
-2. Current issue ID and details
-3. Standard instructions (implement, test, close, signal complete)
+The main issue prompt is built in `build_prompt()`. It concatenates:
+1. Shared prompt from `.ralph/prompts/ralph.md`
+2. Issue-mode prompt from `.ralph/prompts/issue.md` (legacy fallbacks supported)
+3. Runtime context sections (issue details, rules.md, progress log, and instructions)
 
 ### Debugging Claude interactions
 

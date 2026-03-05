@@ -1,2 +1,6 @@
 # Feature Requests
-- If we have to abruptly close, we should use a revert uncommited code OR  be able to resume and pick up current task already in process, check whats left and finish it. (finishes that iteration) kinda like the latter.
+
+--reflect-every-epic (have agent reflect only when epics are complete?)
+
+
+Refactor? or rearchitect the main.rs? Cause look at function worker_main.. its insanelylong / crazy.

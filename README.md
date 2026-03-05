@@ -1,167 +1,140 @@
 # Ralph Beads
 
-An automated development workflow that uses **Claude Code** to iteratively process **Beads** issues.
+An automated workflow that uses Claude Code to iteratively process Beads issues.
 
 ## Overview
 
-Ralph Wiggum is a long-running AI agent loop that:
-1. Reads the next ready issue from Beads
-2. Sends it to Claude Code with your prompt
-3. Claude implements the solution and closes the issue
-4. Repeats until all issues are done (or signals `<promise>COMPLETE</promise>`)
-
-This replaces traditional PRD-based workflows with Beads issue tracking.
+Ralph runs an issue loop:
+1. Reads the next ready issue from Beads (`bd ready`)
+2. Builds a composed prompt from:
+   - `.ralph/prompts/ralph.md` (shared meta rules)
+   - `.ralph/prompts/issue.md` (issue-mode instructions)
+   - runtime issue/progress/rules context
+3. Sends the prompt to `claude --dangerously-skip-permissions --print`
+4. Claude implements and closes the issue
+5. Repeats until done or `<promise>COMPLETE</promise>` is emitted
 
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/claude-code) installed and authenticated
-- [Beads (bd)](https://github.com/...) installed
-- `jq` for JSON parsing
+- `bd` (Beads) installed
 
 ## Installation
 
 ```bash
-# Clone this repo
 git clone https://github.com/youruser/ralph-beads.git
-
-# Build + install the Rust CLI
 cargo install --path /path/to/ralph-beads --bin ralph --force
 ```
 
 ## Setup (per project)
 
 ```bash
-# 1. Initialize Ralph (also bootstraps beads if needed)
 cd your-project
-ralph --init
-
-# 2. Edit the prompt with your project-specific instructions
-$EDITOR .ralph/prompt.md
-
-# 3. Create your issues using Claude in plan mode
-claude --permission-mode plan
-bd create "Issue title" --type task --description "What needs to be done..."
-
-# 4. Run Ralph
-ralph
+ralph init
+$EDITOR .ralph/prompts/issue.md
 ```
 
 ## Usage
 
 ```bash
-# Run with default 10 iterations
+# Standard loop (default 10 iterations)
 ralph
 
-# Run with custom max iterations
+# Custom iteration budget
 ralph --iterations 20
 
-# Process only one issue
+# Process one issue
 ralph --once
 
-# See what would happen without executing
+# Dry-run prompt output
 ralph --dry-run
 
-# Verbose output
+# Verbose activity output
 ralph --verbose
 
-## Workflow
+# Recovery pass for interrupted work
+ralph cleanup
 
-### Phase 1: Planning (Manual)
-Use Claude in plan mode to:
-- Understand the project requirements
-- Break down work into discrete issues
-- Create all beads stories/issues upfront
+# Run reflection once, then exit
+ralph reflect
 
-```bash
-# Plan your work
-claude --permission-mode plan
+# Run reflection suite every 3 iterations
+ralph --reflect-every 3
 
-# Create issues from your plan
-bd create "Implement user authentication" --type feature --description "..."
-bd create "Add database migrations" --type task --description "..."
-bd create "Write API tests" --type task --description "..."
+# Repair missing Ralph files/layout
+ralph doctor
+
+# Print last run summary
+ralph summary
 ```
 
-### Phase 2: Execution (Automated)
-Run the Ralph loop to process issues:
+## Cleanup Behavior
 
-```bash
-ralph
-```
+- `cleanup` runs a dedicated cleanup prompt pass (`.ralph/prompts/cleanup.md`) and exits.
+- Normal loop runs now auto-detect interrupted in-progress work from the previous run log and executes one cleanup pass before continuing.
 
-The loop will:
-1. Find the next unblocked issue (`bd ready`)
-2. Build a prompt combining `.ralph/prompt.md` + issue details
-3. Call Claude Code with `--dangerously-skip-permissions`
-4. Claude implements and closes the issue
-5. Check for completion signal (`<promise>COMPLETE</promise>`)
-6. Move to next issue or exit if complete
+## Reflection Behavior
+
+- `reflect` runs two passes and exits:
+  - `.ralph/prompts/quality-check.md`
+  - `.ralph/prompts/code-review-check.md`
+  - `.ralph/prompts/validation-check.md`
+- `--reflect-every N` runs the same three passes every `N` loop iterations.
 
 ## Files
 
-**This repo (ralph-beads):**
-```
+Repository defaults:
+
+```text
 ralph-beads/
-├── src/main.rs        # The main Ralph Rust CLI
-├── prompt.md          # Default prompt template (copied on --init)
-├── CLAUDE.md          # Points to AGENTS.md
-└── AGENTS.md          # Guidelines for developing/maintaining this repo
+├── ralph.md
+├── issue.md
+├── prompt.md (legacy compatibility template)
+├── cleanup.md
+├── quality-check.md
+├── code-review-check.md
+├── validation-check.md
+└── src/
 ```
 
-**Your project (after `ralph --init`):**
-```
+Project layout after `ralph init`:
+
+```text
 your-project/
-├── .ralph/
-│   ├── prompt.md      # Your project-specific instructions
-│   ├── progress.txt   # Log of Ralph's progress (auto-created)
-│   ├── archive/       # Previous runs archived here
-│   └── .last-run      # Run tracking
-└── ...
+└── .ralph/
+    ├── prompts/
+    │   ├── ralph.md
+    │   ├── issue.md
+    │   ├── cleanup.md
+    │   ├── quality-check.md
+    │   ├── code-review-check.md
+    │   └── validation-check.md
+    ├── progress.txt
+    ├── archive/
+    ├── logs/
+    └── .last-run
 ```
 
 ## Progress Tracking
 
 Ralph automatically:
-- Creates `.ralph/progress.txt` to log each iteration
-- Archives previous runs to `.ralph/archive/` when starting fresh
-- Saves beads snapshots with each archive
+- Appends progress to `.ralph/progress.txt`
+- Archives previous run logs in `.ralph/archive/`
+- Writes debug logs in `.ralph/logs/` when `--debug` is enabled
 
-**Add to your project's `.gitignore`:**
+Add to project `.gitignore`:
+
 ```gitignore
-# Ralph state files (keep prompt.md, ignore the rest)
 .ralph/progress.txt
 .ralph/archive/
 .ralph/.last-run
+.ralph/logs/
 ```
-
-## Completion Signal
-
-Claude can signal completion by outputting:
-```
-<promise>COMPLETE</promise>
-```
-
-This tells Ralph that all work is done, even if issues remain (e.g., future work items).
 
 ## Environment Variables
 
-- `RALPH_MAX_ITERATIONS` - Override default max iterations (default: 10)
+- `RALPH_MAX_ITERATIONS` overrides the default iteration budget.
 
-## Safety Notes
+## Safety
 
-This script uses `--dangerously-skip-permissions` to allow Claude to work autonomously. Only run this:
-- In trusted, sandboxed environments
-- On code you're prepared to review
-- With proper backups/version control
-
-## Beads Commands Reference
-
-```bash
-bd ready              # Find unblocked work
-bd list               # List all issues  
-bd list --status open # List open issues
-bd show <id>          # Show issue details
-bd create "Title"     # Create new issue
-bd close <id>         # Close an issue
-bd sync               # Sync with git
-```
+Ralph uses `--dangerously-skip-permissions` for autonomous operation. Run only in trusted repositories and review all changes.

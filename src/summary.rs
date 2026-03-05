@@ -273,8 +273,12 @@ fn parse_semantic_file(run_dir: &Path, insights: &mut RunInsights) -> Result<()>
                 }
                 if event_type == Some("validation_failed") {
                     let reason = event
-                        .and_then(|event| event.get("reason"))
-                        .and_then(Value::as_str)
+                        .and_then(|event| {
+                            event
+                                .get("reason_full")
+                                .and_then(Value::as_str)
+                                .or_else(|| event.get("reason").and_then(Value::as_str))
+                        })
                         .unwrap_or("validation_failed");
                     let signature = failure_signature(reason);
                     *insights.failure_patterns.entry(signature).or_insert(0) += 1;

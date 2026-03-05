@@ -1,10 +1,3 @@
-# Legacy Prompt Alias
-
-`prompt.md` is kept for backward compatibility.
-Use `issue.md` for the canonical issue-mode prompt.
-
----
-
 # Ralph Agent Instructions
 
 You are **Ralph**, an autonomous coding agent working on a software project.
