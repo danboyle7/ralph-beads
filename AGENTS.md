@@ -14,7 +14,10 @@ Do not confuse these. Changes to `prompt.md` affect how Ralph behaves in target 
 ## Architecture
 
 ```
-ralph.sh          # Orchestration script - the loop runner
+src/main.rs       # Rust CLI entrypoint
+src/cli.rs        # CLI args and path layout
+src/init.rs       # `ralph --init` bootstrap logic
+src/summary.rs    # `ralph --summary` rendering
 prompt.md         # Agent instructions (injected into each Claude call)
 progress.txt      # Runtime log (auto-generated, gitignored)
 archive/          # Previous run archives (auto-generated)
@@ -22,7 +25,7 @@ archive/          # Previous run archives (auto-generated)
 
 ### How It Works
 
-1. `ralph.sh` calls `bd ready` to get the next issue
+1. `ralph` calls `bd ready` to get the next issue
 2. Builds a prompt from `prompt.md` + issue details
 3. Pipes to `claude --dangerously-skip-permissions --print`
 4. Checks for `<promise>COMPLETE</promise>` signal
@@ -32,14 +35,14 @@ archive/          # Previous run archives (auto-generated)
 
 ### Testing Changes
 
-Always test script changes with dry-run first:
+Always test loop changes with dry-run first:
 
 ```bash
-./ralph.sh --dry-run
-./ralph.sh --dry-run --verbose
+cargo run --bin ralph -- --dry-run
+cargo run --bin ralph -- --dry-run --verbose
 ```
 
-### Modifying ralph.sh
+### Modifying the Rust CLI
 
 - Keep the loop logic simple and predictable
 - All Claude interaction goes through stdin pipe (no interactive mode)
@@ -64,15 +67,14 @@ Always test script changes with dry-run first:
 
 - `claude` CLI (Claude Code)
 - `bd` CLI (Beads)
-- `jq` for JSON parsing
-- Standard bash utilities
+- Rust toolchain
 
 ## Common Tasks
 
 ### Adding a new CLI flag
 
-1. Add to the `case` statement in argument parsing
-2. Add to `--help` output
+1. Add to `src/cli.rs` (`Cli` struct)
+2. Wire behavior in `src/main.rs` (or a submodule)
 3. Document in README.md
 
 ### Changing the prompt format

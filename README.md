@@ -24,28 +24,25 @@ This replaces traditional PRD-based workflows with Beads issue tracking.
 # Clone this repo
 git clone https://github.com/youruser/ralph-beads.git
 
-# Symlink to PATH
-ln -s /path/to/ralph-beads/ralph.sh /usr/local/bin/ralph
+# Build + install the Rust CLI
+cargo install --path /path/to/ralph-beads --bin ralph --force
 ```
 
 ## Setup (per project)
 
 ```bash
-# 1. Initialize beads in your project (if not already)
+# 1. Initialize Ralph (also bootstraps beads if needed)
 cd your-project
-bd init
-
-# 2. Initialize Ralph
 ralph --init
 
-# 3. Edit the prompt with your project-specific instructions
+# 2. Edit the prompt with your project-specific instructions
 $EDITOR .ralph/prompt.md
 
-# 4. Create your issues using Claude in plan mode
+# 3. Create your issues using Claude in plan mode
 claude --permission-mode plan
 bd create "Issue title" --type task --description "What needs to be done..."
 
-# 5. Run Ralph
+# 4. Run Ralph
 ralph
 ```
 
@@ -56,7 +53,7 @@ ralph
 ralph
 
 # Run with custom max iterations
-ralph 20
+ralph --iterations 20
 
 # Process only one issue
 ralph --once
@@ -66,10 +63,6 @@ ralph --dry-run
 
 # Verbose output
 ralph --verbose
-
-# Stream progress in real-time (run in a separate terminal)
-ralph --watch
-```
 
 ## Workflow
 
@@ -109,7 +102,7 @@ The loop will:
 **This repo (ralph-beads):**
 ```
 ralph-beads/
-├── ralph.sh           # The main Ralph loop script (install this)
+├── src/main.rs        # The main Ralph Rust CLI
 ├── prompt.md          # Default prompt template (copied on --init)
 ├── CLAUDE.md          # Points to AGENTS.md
 └── AGENTS.md          # Guidelines for developing/maintaining this repo

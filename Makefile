@@ -1,9 +1,8 @@
 SHELL := /bin/bash
 
 CARGO ?= cargo
-INSTALL_DIR ?= /usr/local/bin
 
-.PHONY: help build release run check install install-rust install-shell clean
+.PHONY: help build release run check install clean
 
 help:
 	@echo "Targets:"
@@ -12,8 +11,6 @@ help:
 	@echo "  make run           Run the Rust binary via cargo"
 	@echo "  make check         Run cargo check"
 	@echo "  make install       Install the Rust binary with cargo"
-	@echo "  make install-rust  Install the Rust binary with cargo"
-	@echo "  make install-shell Symlink ralph.sh to $(INSTALL_DIR)/ralph"
 	@echo "  make clean         Remove build artifacts"
 
 build:
@@ -23,18 +20,13 @@ release:
 	$(CARGO) build --release
 
 run:
-	$(CARGO) run --bin ralph-rs --
+	$(CARGO) run --bin ralph --
 
 check:
 	$(CARGO) check
 
-install: install-rust
-
-install-rust:
-	$(CARGO) install --path . --bin ralph-rs --force
-
-install-shell:
-	ln -sf "$(CURDIR)/ralph.sh" "$(INSTALL_DIR)/ralph"
+install:
+	$(CARGO) install --path . --bin ralph --force
 
 clean:
 	$(CARGO) clean
