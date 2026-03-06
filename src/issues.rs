@@ -229,19 +229,22 @@ pub(crate) fn get_next_issue() -> Result<Option<String>> {
     let value: Value =
         serde_json::from_str(&output).with_context(|| format!("failed to parse {:?}", args))?;
 
-    Ok(value.as_array().and_then(|items| next_ready_issue_id(items)))
+    Ok(value
+        .as_array()
+        .and_then(|items| next_ready_issue_id(items)))
 }
 
 pub(crate) fn get_issue_details(issue_id: &str) -> Result<String> {
-    run_bd_query(["bd", "show", issue_id, "--no-pager"], "issue details")
-        .or_else(|_| Ok(format!("Issue: {issue_id}")))
+    match run_bd_query(["bd", "show", issue_id], "issue details") {
+        Ok(output) => Ok(output),
+        Err(error) => Ok(format!(
+            "Issue: {issue_id}\n\nUnable to load `bd show {issue_id}`:\n{error}"
+        )),
+    }
 }
 
 pub(crate) fn get_issue_type(issue_id: &str) -> Result<Option<String>> {
-    let output = run_bd_query(
-        ["bd", "show", issue_id, "--json", "--no-pager"],
-        "issue type lookup",
-    )?;
+    let output = run_bd_query(["bd", "show", issue_id, "--json"], "issue type lookup")?;
     let value: Value = serde_json::from_str(&output).context("failed to parse bd show JSON")?;
     Ok(issue_type_from_show_value(&value))
 }
