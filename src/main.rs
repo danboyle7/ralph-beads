@@ -23,7 +23,7 @@ use crossterm::ExecutableCommand;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use serde_json::{json, Value};
 
@@ -61,6 +61,9 @@ const MAX_DIFF_LINES_PER_EVENT: usize = 280;
 const MAX_LIVE_CALLS: usize = 300;
 const AUTO_SCROLL: u16 = u16::MAX;
 const SCROLL_STEP: usize = 3;
+const DEFAULT_TUI_FOOTER: &str =
+    "Controls: q/Esc quit now, Shift+Q stop after current iteration, mouse wheel scrolls panel";
+const DEFAULT_ADDITIONAL_ITERATIONS: usize = 5;
 const BG_MAIN: Color = Color::Rgb(10, 14, 24);
 const BG_PANEL: Color = Color::Rgb(18, 24, 38);
 const BG_HEADER: Color = Color::Rgb(12, 34, 52);
@@ -170,6 +173,10 @@ struct UiApp {
     timeline_scroll: u16,
     subagent_scroll: u16,
     diff_scroll: u16,
+    awaiting_iteration_extension: bool,
+    iteration_input_mode: bool,
+    iteration_input_value: String,
+    iteration_input_error: Option<String>,
     should_quit: bool,
 }
 
@@ -190,9 +197,7 @@ impl UiApp {
             subagent_calls: HashMap::new(),
             subagent_order: VecDeque::new(),
             diff_lines: VecDeque::new(),
-            footer:
-                "Controls: q/Esc quit now, Shift+Q stop after current iteration, mouse wheel scrolls panel"
-                    .to_string(),
+            footer: DEFAULT_TUI_FOOTER.to_string(),
             spinner_label: None,
             spinner_frame: 0,
             usage: UsageTally::default(),
@@ -205,6 +210,10 @@ impl UiApp {
             timeline_scroll: AUTO_SCROLL,
             subagent_scroll: AUTO_SCROLL,
             diff_scroll: AUTO_SCROLL,
+            awaiting_iteration_extension: false,
+            iteration_input_mode: false,
+            iteration_input_value: DEFAULT_ADDITIONAL_ITERATIONS.to_string(),
+            iteration_input_error: None,
             should_quit: false,
         }
     }
@@ -327,6 +336,38 @@ impl UiApp {
                 .subagent_calls
                 .values()
                 .any(|entry| entry.status == LiveCallStatus::Running)
+    }
+
+    fn set_default_footer(&mut self) {
+        if self.graceful_quit_requested {
+            self.footer =
+                "Graceful stop requested. Ralph will exit after the current iteration.".to_string();
+        } else {
+            self.footer = DEFAULT_TUI_FOOTER.to_string();
+        }
+    }
+
+    fn set_iteration_extension_ready(&mut self, total_iterations: usize) {
+        self.awaiting_iteration_extension = true;
+        self.iteration_input_mode = false;
+        self.iteration_input_value = DEFAULT_ADDITIONAL_ITERATIONS.to_string();
+        self.iteration_input_error = None;
+        self.status = "Waiting for iteration input".to_string();
+        self.footer = format!(
+            "Reached the current iteration budget ({total_iterations}). Press n for 1 more, x to add more (default {DEFAULT_ADDITIONAL_ITERATIONS}), q/Esc to exit."
+        );
+    }
+
+    fn open_iteration_input(&mut self) {
+        self.awaiting_iteration_extension = true;
+        self.iteration_input_mode = true;
+        self.iteration_input_value = DEFAULT_ADDITIONAL_ITERATIONS.to_string();
+        self.iteration_input_error = None;
+    }
+
+    fn close_iteration_input(&mut self) {
+        self.iteration_input_mode = false;
+        self.iteration_input_error = None;
     }
 
     fn tool_panel_lines(&self, spinner: &str) -> Vec<String> {
@@ -545,6 +586,20 @@ fn split_for_ui(line: &str) -> Vec<String> {
     parts
 }
 
+fn parse_additional_iterations(input: &str) -> Result<usize, &'static str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a positive number of iterations.");
+    }
+
+    let parsed = trimmed.parse::<usize>().map_err(|_| "Enter digits only.")?;
+    if parsed == 0 {
+        return Err("Iteration count must be at least 1.");
+    }
+
+    Ok(parsed)
+}
+
 enum UiEvent {
     Status(String),
     Summary(String),
@@ -562,7 +617,13 @@ enum UiEvent {
     ToolCall(ToolCallUiUpdate),
     SubagentCall(SubagentUiUpdate),
     Spinner(Option<String>),
+    IterationBudgetReached(usize),
     Stop(String),
+}
+
+enum WorkerControl {
+    ExtendIterations(usize),
+    Exit,
 }
 
 fn main() -> Result<()> {
@@ -839,6 +900,9 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
             }
             UiEvent::Spinner(Some(label)) => eprintln!("[claude] {label}"),
             UiEvent::Spinner(None) => {}
+            UiEvent::IterationBudgetReached(total_iterations) => eprintln!(
+                "[ralph] Reached max iterations ({total_iterations}); TUI input required to continue"
+            ),
             UiEvent::Stop(line) => {
                 eprintln!("[ralph] {line}");
                 break;
@@ -848,15 +912,20 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
     Ok(())
 }
 
-fn run_live_tui(ui_rx: Receiver<UiEvent>, graceful_quit: Arc<AtomicBool>) -> Result<()> {
+fn run_live_tui(
+    ui_rx: Receiver<UiEvent>,
+    control_tx: Sender<WorkerControl>,
+    graceful_quit: Arc<AtomicBool>,
+) -> Result<()> {
     let mut terminal = init_terminal()?;
-    let result = live_tui_loop(ui_rx, graceful_quit, &mut terminal);
+    let result = live_tui_loop(ui_rx, control_tx, graceful_quit, &mut terminal);
     restore_terminal(&mut terminal)?;
     result
 }
 
 fn live_tui_loop(
     ui_rx: Receiver<UiEvent>,
+    control_tx: Sender<WorkerControl>,
     graceful_quit: Arc<AtomicBool>,
     terminal: &mut DefaultTerminal,
 ) -> Result<()> {
@@ -884,7 +953,17 @@ fn live_tui_loop(
                 UiEvent::ToolCall(update) => app.apply_tool_call_update(update),
                 UiEvent::SubagentCall(update) => app.apply_subagent_update(update),
                 UiEvent::Spinner(label) => app.spinner_label = label,
+                UiEvent::IterationBudgetReached(total_iterations) => {
+                    app.spinner_label = None;
+                    app.set_iteration_extension_ready(total_iterations);
+                    app.push_activity(format!(
+                        "Reached iteration budget ({total_iterations}); waiting for TUI input"
+                    ));
+                }
                 UiEvent::Stop(line) => {
+                    app.awaiting_iteration_extension = false;
+                    app.iteration_input_mode = false;
+                    app.iteration_input_error = None;
                     if line.contains("rate-limited") {
                         app.status = "Rate limited".to_string();
                         app.footer = format!(
@@ -904,15 +983,63 @@ fn live_tui_loop(
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
                 CEvent::Key(key) => {
-                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                    if app.iteration_input_mode {
+                        match key.code {
+                            KeyCode::Esc => app.close_iteration_input(),
+                            KeyCode::Enter => {
+                                match parse_additional_iterations(&app.iteration_input_value) {
+                                    Ok(additional) => {
+                                        let _ = control_tx
+                                            .send(WorkerControl::ExtendIterations(additional));
+                                        app.awaiting_iteration_extension = false;
+                                        app.close_iteration_input();
+                                        app.status =
+                                            format!("Resuming with {additional} more iterations");
+                                        app.push_activity(format!(
+                                            "User requested {additional} additional iterations"
+                                        ));
+                                        app.set_default_footer();
+                                    }
+                                    Err(error) => {
+                                        app.iteration_input_error = Some(error.to_string())
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                app.iteration_input_value.pop();
+                                app.iteration_input_error = None;
+                            }
+                            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                                app.iteration_input_value.push(ch);
+                                app.iteration_input_error = None;
+                            }
+                            _ => {}
+                        }
+                    } else if app.awaiting_iteration_extension {
+                        match key.code {
+                            KeyCode::Char('n') => {
+                                let _ = control_tx.send(WorkerControl::ExtendIterations(1));
+                                app.awaiting_iteration_extension = false;
+                                app.status = "Resuming with 1 more iteration".to_string();
+                                app.push_activity(
+                                    "User requested 1 additional iteration".to_string(),
+                                );
+                                app.set_default_footer();
+                            }
+                            KeyCode::Char('x') | KeyCode::Char('X') => app.open_iteration_input(),
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                let _ = control_tx.send(WorkerControl::Exit);
+                                app.should_quit = true;
+                            }
+                            _ => {}
+                        }
+                    } else if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                         app.should_quit = true;
                     } else if matches!(key.code, KeyCode::Char('Q')) && !app.graceful_quit_requested
                     {
                         graceful_quit.store(true, Ordering::Relaxed);
                         app.graceful_quit_requested = true;
-                        app.footer =
-                            "Graceful stop requested. Ralph will exit after the current iteration."
-                                .to_string();
+                        app.set_default_footer();
                         app.push_activity("Graceful stop requested by user".to_string());
                     }
                 }
@@ -991,6 +1118,20 @@ fn run_layout(area: Rect) -> RunLayout {
         subagent: side[2],
         footer: vertical[2],
     }
+}
+
+fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
+    let popup_width = area
+        .width
+        .saturating_mul(width_percent)
+        .checked_div(100)
+        .unwrap_or(area.width)
+        .max(24)
+        .min(area.width);
+    let popup_height = height.min(area.height);
+    let x = area.x + area.width.saturating_sub(popup_width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+    Rect::new(x, y, popup_width, popup_height)
 }
 
 fn visible_line_capacity(area: Rect) -> usize {
@@ -1289,7 +1430,7 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
         ))
         .wrap(Wrap { trim: false });
 
-    let output = Paragraph::new(lines_from_output(&app.output_lines))
+    let output = Paragraph::new(lines_from_output(&app.output_lines, layout.output))
         .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
         .block(
             Block::default()
@@ -1312,7 +1453,7 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
         ))
         .wrap(Wrap { trim: false });
 
-    let diff = Paragraph::new(lines_from_diff(&app.diff_lines))
+    let diff = Paragraph::new(lines_from_diff(&app.diff_lines, layout.diff))
         .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
         .block(
             Block::default()
@@ -1409,6 +1550,47 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
     frame.render_widget(timeline, layout.timeline);
     frame.render_widget(subagent, layout.subagent);
     frame.render_widget(footer, layout.footer);
+
+    if app.iteration_input_mode {
+        let popup_area = centered_rect(frame.area(), 42, 7);
+        let help_line = app
+            .iteration_input_error
+            .clone()
+            .unwrap_or_else(|| "Type a positive number, then press Enter to resume.".to_string());
+        let popup = Paragraph::new(vec![
+            Line::from("How many more iterations should Ralph run?"),
+            Line::from(String::new()),
+            Line::from(vec![
+                Span::styled(
+                    "More iterations: ",
+                    Style::default()
+                        .fg(ACCENT_INFO)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    app.iteration_input_value.clone(),
+                    Style::default().fg(FG_MAIN),
+                ),
+            ]),
+            Line::from(Span::styled(help_line, Style::default().fg(ACCENT_WARN))),
+        ])
+        .style(Style::default().fg(FG_MAIN).bg(BG_HEADER))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT_INFO))
+                .title(Span::styled(
+                    "Add Iterations",
+                    Style::default()
+                        .fg(ACCENT_INFO)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
+        .wrap(Wrap { trim: false });
+
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(popup, popup_area);
+    }
 }
 
 fn lines_from(lines: &VecDeque<String>) -> Vec<Line<'static>> {
@@ -1427,34 +1609,70 @@ fn lines_from_slice(lines: &[String]) -> Vec<Line<'static>> {
     }
 }
 
-fn lines_from_output(lines: &VecDeque<String>) -> Vec<Line<'static>> {
+fn lines_from_output(lines: &VecDeque<String>, area: Rect) -> Vec<Line<'static>> {
     if lines.is_empty() {
         return vec![Line::from(String::new())];
     }
 
-    lines
-        .iter()
-        .map(|line| {
-            if let Some(rest) = line.strip_prefix("Δ ") {
-                return Line::from(Span::styled(rest.to_string(), diff_line_style(rest)));
-            }
-            if line == "Δ" {
-                return Line::from(Span::styled(String::new(), diff_line_style("")));
-            }
-            Line::from(Span::styled(line.clone(), Style::default().fg(FG_MAIN)))
+    let width = content_width(area);
+    let mut rendered = Vec::new();
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("Δ ") {
+            rendered.extend(styled_rows(rest, diff_line_style(rest), width));
+        } else if line == "Δ" {
+            rendered.extend(styled_rows("", diff_line_style(""), width));
+        } else {
+            rendered.push(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(FG_MAIN),
+            )));
+        }
+    }
+    rendered
+}
+
+fn lines_from_diff(lines: &VecDeque<String>, area: Rect) -> Vec<Line<'static>> {
+    if lines.is_empty() {
+        return vec![Line::from(String::new())];
+    }
+
+    let width = content_width(area);
+    let mut rendered = Vec::new();
+    for line in lines {
+        rendered.extend(styled_rows(line, diff_line_style(line), width));
+    }
+    rendered
+}
+
+fn styled_rows(text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::from(Span::styled(text.to_string(), style))];
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return vec![Line::from(Span::styled(" ".repeat(width), style))];
+    }
+
+    chars
+        .chunks(width)
+        .map(|chunk| {
+            let segment = chunk.iter().collect::<String>();
+            Line::from(Span::styled(pad_to_width(&segment, width), style))
         })
         .collect()
 }
 
-fn lines_from_diff(lines: &VecDeque<String>) -> Vec<Line<'static>> {
-    if lines.is_empty() {
-        return vec![Line::from(String::new())];
+fn pad_to_width(text: &str, width: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count >= width {
+        return text.to_string();
     }
 
-    lines
-        .iter()
-        .map(|line| Line::from(Span::styled(line.clone(), diff_line_style(line))))
-        .collect()
+    let mut padded = String::with_capacity(text.len() + (width - char_count));
+    padded.push_str(text);
+    padded.push_str(&" ".repeat(width - char_count));
+    padded
 }
 
 fn diff_line_style(line: &str) -> Style {

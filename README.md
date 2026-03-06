@@ -121,6 +121,11 @@ ralph summary --json
 ralph --version
 ```
 
+Interactive TUI note:
+- When Ralph reaches the current iteration budget without finishing, the TUI can extend the same run in place.
+- Press `n` for one more iteration, or `x` to open a numeric prompt (prefilled with `5`) and add that many more iterations.
+- These controls only appear after the current budget is exhausted; plain mode still stops at the configured budget.
+
 ## Cleanup + reflection
 
 - `ralph cleanup` runs `.ralph/prompts/cleanup.md` once, then exits.

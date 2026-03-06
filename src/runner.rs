@@ -1,8 +1,20 @@
 use super::*;
 
+struct IterationPauseSummary {
+    open_count: usize,
+    completed_issues: usize,
+    failed_issues: usize,
+}
+
 pub(super) fn run_main_loop(cli: Cli, paths: Paths, settings: RuntimeSettings) -> Result<()> {
     let use_tui = !cli.plain && io::stdout().is_terminal();
     let (ui_tx, ui_rx) = mpsc::channel();
+    let (control_tx, control_rx) = if use_tui {
+        let (tx, rx) = mpsc::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let graceful_quit = Arc::new(AtomicBool::new(false));
 
     let worker_cli = cli.clone();
@@ -15,12 +27,17 @@ pub(super) fn run_main_loop(cli: Cli, paths: Paths, settings: RuntimeSettings) -
             worker_paths,
             worker_settings,
             ui_tx,
+            control_rx,
             worker_graceful_quit,
         )
     });
 
     let ui_result = if use_tui {
-        run_live_tui(ui_rx, graceful_quit)
+        run_live_tui(
+            ui_rx,
+            control_tx.expect("TUI control channel missing"),
+            graceful_quit,
+        )
     } else {
         run_plain_ui(ui_rx)
     };
@@ -39,6 +56,7 @@ pub(super) fn worker_main(
     paths: Paths,
     settings: RuntimeSettings,
     ui_tx: Sender<UiEvent>,
+    control_rx: Option<Receiver<WorkerControl>>,
     graceful_quit: Arc<AtomicBool>,
 ) -> Result<()> {
     let _cleanup = CleanupGuard::new(true);
@@ -70,16 +88,17 @@ pub(super) fn worker_main(
     let interrupted_issue = detect_interrupted_issue(&paths)
         .context("startup failed while checking interrupted work")?;
 
+    let mut total_iterations = if cli.once { 1 } else { settings.max_iterations };
+
     announce_startup_step("Startup: archiving previous run (if present)");
     archive_previous_run(&paths, &ui_tx)?;
 
     announce_startup_step("Startup: initializing progress log");
-    let run_id = init_progress_file(&paths, settings.max_iterations)?;
+    let run_id = init_progress_file(&paths, total_iterations)?;
     announce_startup_step("Startup: loading open issue count");
     let mut open_count = get_open_issue_count()?;
     announce_startup_step("Startup: writing issue snapshot baseline");
     write_issue_snapshot(&paths, Some(&run_id))?;
-    let total_iterations = if cli.once { 1 } else { settings.max_iterations };
     write_run_state(
         &paths,
         &RunState {
@@ -289,7 +308,49 @@ pub(super) fn worker_main(
         log_progress(&paths, &ui_tx, "Auto-cleanup pass completed".to_string())?;
     }
 
-    for iteration in 1..=total_iterations {
+    let mut iteration = 1_usize;
+    loop {
+        if iteration > total_iterations {
+            if let Some(control_rx) = control_rx.as_ref() {
+                match wait_for_iteration_extension(
+                    &paths,
+                    &run_id,
+                    &ui_tx,
+                    control_rx,
+                    &mut debug_logs,
+                    total_iterations,
+                    IterationPauseSummary {
+                        open_count,
+                        completed_issues,
+                        failed_issues,
+                    },
+                )? {
+                    Some(additional_iterations) => {
+                        total_iterations += additional_iterations;
+                        continue;
+                    }
+                    None => {
+                        mark_run_state_finished(&paths, &run_id, "stopped")?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            log_progress(
+                &paths,
+                &ui_tx,
+                format!("STOPPED: Reached max iterations ({total_iterations})"),
+            )?;
+            send(
+                &ui_tx,
+                UiEvent::Stop(format!(
+                    "Reached max iterations ({total_iterations}) without completion"
+                )),
+            );
+            mark_run_state_finished(&paths, &run_id, "stopped")?;
+            return Ok(());
+        }
+
         send(
             &ui_tx,
             UiEvent::Status(format!("Iteration {iteration}/{total_iterations}")),
@@ -627,7 +688,7 @@ pub(super) fn worker_main(
         };
         let iteration_reflection_due = settings
             .reflect_every
-            .is_some_and(|every| iteration % every == 0);
+            .is_some_and(|every| iteration.is_multiple_of(every));
         let should_reflect = (!closed_epics.is_empty() || iteration_reflection_due)
             && !graceful_quit.load(Ordering::Relaxed);
 
@@ -684,21 +745,103 @@ pub(super) fn worker_main(
             mark_run_state_finished(&paths, &run_id, "stopped")?;
             return Ok(());
         }
-    }
 
-    log_progress(
-        &paths,
-        &ui_tx,
-        format!("STOPPED: Reached max iterations ({total_iterations})"),
+        iteration += 1;
+    }
+}
+
+fn wait_for_iteration_extension(
+    paths: &Paths,
+    run_id: &str,
+    ui_tx: &Sender<UiEvent>,
+    control_rx: &Receiver<WorkerControl>,
+    debug_logs: &mut Option<DebugLogs>,
+    total_iterations: usize,
+    summary: IterationPauseSummary,
+) -> Result<Option<usize>> {
+    update_run_state_progress(
+        paths,
+        run_id,
+        None,
+        total_iterations,
+        total_iterations,
+        "waiting_for_input",
     )?;
-    send(
-        &ui_tx,
-        UiEvent::Stop(format!(
-            "Reached max iterations ({total_iterations}) without completion"
-        )),
-    );
-    mark_run_state_finished(&paths, &run_id, "stopped")?;
-    Ok(())
+    log_progress(
+        paths,
+        ui_tx,
+        format!("Paused after reaching max iterations ({total_iterations}); waiting for TUI input"),
+    )?;
+    send(ui_tx, UiEvent::IterationBudgetReached(total_iterations));
+
+    match control_rx.recv() {
+        Ok(WorkerControl::ExtendIterations(additional_iterations)) => {
+            let new_total_iterations = total_iterations + additional_iterations;
+            update_run_state_progress(
+                paths,
+                run_id,
+                None,
+                total_iterations,
+                new_total_iterations,
+                "running",
+            )?;
+            log_progress(
+                paths,
+                ui_tx,
+                format!("Max Iterations: {new_total_iterations}"),
+            )?;
+            log_progress(
+                paths,
+                ui_tx,
+                format!(
+                    "Resuming run with {additional_iterations} additional iteration{} (new budget: {new_total_iterations})",
+                    if additional_iterations == 1 { "" } else { "s" }
+                ),
+            )?;
+            send_activity(
+                ui_tx,
+                debug_logs,
+                format!(
+                    "Iteration budget extended by {additional_iterations}; next iteration will be {}/{}",
+                    total_iterations + 1,
+                    new_total_iterations
+                ),
+            );
+            send(
+                ui_tx,
+                UiEvent::Summary(format_run_stats(
+                    run_id,
+                    summary.open_count,
+                    summary.completed_issues,
+                    summary.failed_issues,
+                    total_iterations,
+                    new_total_iterations,
+                )),
+            );
+            send(
+                ui_tx,
+                UiEvent::Status(format!(
+                    "Resuming with {additional_iterations} more iteration{}",
+                    if additional_iterations == 1 { "" } else { "s" }
+                )),
+            );
+            Ok(Some(additional_iterations))
+        }
+        Ok(WorkerControl::Exit) | Err(_) => {
+            log_progress(
+                paths,
+                ui_tx,
+                format!("STOPPED: Reached max iterations ({total_iterations})"),
+            )?;
+            send(
+                ui_tx,
+                UiEvent::Stop(format!(
+                    "Reached max iterations ({total_iterations}) without completion"
+                )),
+            );
+            Ok(None)
+        }
+    }
 }
 
 pub(super) fn format_run_stats(
