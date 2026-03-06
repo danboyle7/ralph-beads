@@ -28,6 +28,7 @@ cargo run --bin ralph -- --dry-run --verbose
 If your change touches prompt templates (`prompts/*.md`), test on a throwaway repo after `ralph init`.
 
 PRs also run GitHub Actions for formatting, clippy, tests, cross-platform build checks, and dependency audit.
+Default-branch pushes also run `release-plz` to open/update release PRs and cut tags/releases after release PR merges.
 
 ## Code change guidelines
 

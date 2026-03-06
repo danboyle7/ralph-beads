@@ -20,6 +20,7 @@ ralph-beads/
 ├── CLAUDE.md
 ├── docs/
 │   └── TODO.md
+├── release-plz.toml
 ├── prompts/
 │   ├── ralph.md
 │   ├── issue.md
@@ -34,7 +35,8 @@ ralph-beads/
     ├── SECURITY.md
     └── workflows/
         ├── ci.yml
-        └── dependency-audit.yml
+        ├── dependency-audit.yml
+        └── release-plz.yml
 ```
 
 ## Prerequisites
@@ -157,6 +159,24 @@ make check
 cargo run --bin ralph -- --dry-run
 cargo run --bin ralph -- --dry-run --verbose
 ```
+
+## Release automation
+
+This repo uses `release-plz` with:
+- [release-plz.toml](./release-plz.toml) (`git_only = true`)
+- [release workflow](./.github/workflows/release-plz.yml)
+
+On push to `main`/`master`:
+- `release-pr` opens or updates a release PR with version/changelog changes.
+- `release` creates git tags and GitHub releases when a release PR merge commit is on the default branch.
+
+Required GitHub repo settings:
+- `Settings -> Actions -> General -> Workflow permissions`: `Read and write permissions`
+- Enable `Allow GitHub Actions to create and approve pull requests`
+
+If you later want crates.io publishing:
+- set `git_only = false` in `release-plz.toml`
+- add `CARGO_REGISTRY_TOKEN` repository secret
 
 ## Config
 

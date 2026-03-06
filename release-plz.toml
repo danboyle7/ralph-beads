@@ -1,0 +1,7 @@
+[workspace]
+# Keep releases tied to merged release PRs instead of every push.
+release_always = false
+
+# Use release-plz for version bumps, changelogs, git tags, and GitHub releases.
+# No crates.io publish is attempted in this mode.
+git_only = true
