@@ -1,94 +1,73 @@
-# Ralph-Beads Repository Guidelines
+# Ralph-Beads Agent Guidelines
 
-This repo contains **ralph-beads**, a tool for running autonomous Claude Code loops on beads issues. These guidelines are for working on this repo itself, not for the Ralph agent.
+This file is for agents modifying the **ralph-beads tool repo** itself.
 
-## Important Distinction
+## Scope And Distinction
 
-| File | Purpose |
-|------|---------|
-| `ralph.md` + `issue.md` | Shared and issue-mode instructions for the **Ralph agent** |
-| `AGENTS.md` (this file) | Instructions for **you** when modifying this tool |
+- `prompts/*.md` defines Ralph behavior in downstream target repos.
+- `AGENTS.md` defines how to safely change this tool repo.
+- Treat prompt edits as high-impact: they affect every project using `ralph init`.
 
-Do not confuse these. Changes to agent prompt files affect how Ralph behaves in target projects. Changes here guide development of the tool itself.
+## Minimal Orientation
 
-## Architecture
+- CLI/runtime entry and orchestration: `src/main.rs`, `src/runner.rs`
+- Prompt assembly: `src/prompts.rs`
+- Project bootstrap/repair/upgrade: `src/init.rs`
+- CLI flags and path layout: `src/cli.rs`
+- Snapshot/issue integrity checks: `src/issues.rs`
+- Run lock + persisted run state: `src/run_state.rs`
+- User docs/policies: `README.md`, `.github/*.md`, `LICENSE`
 
-```
-src/main.rs       # Rust CLI entrypoint
-src/cli.rs        # CLI args and path layout
-src/init.rs       # `ralph init` bootstrap logic
-src/summary.rs    # `ralph summary` rendering
-ralph.md          # Shared meta prompt template
-issue.md          # Issue-mode prompt template
-cleanup.md        # Default cleanup pass template
-quality-check.md  # Default reflection quality template
-code-review-check.md # Default reflection code-review template
-validation-check.md # Default reflection validation template
-.ralph/progress.txt # Runtime log (in target project, auto-generated)
-.ralph/archive/   # Previous run archives (in target project, auto-generated)
-```
+## Non-Negotiable Invariants
 
-### How It Works
+1. Issue selection must come from `bd ready` (ready/unblocked ordering).
+2. Completion signal remains `<promise>COMPLETE</promise>`.
+3. Progress log behavior remains append-only.
+4. Previous run artifacts are archived before a new run starts.
+5. Claude execution remains non-interactive (stdin-driven).
+6. Autonomous execution keeps `--dangerously-skip-permissions`.
+7. Exit codes stay stable: `0` continue/success path, `100` all complete, other values for errors.
 
-1. `ralph` calls `bd ready` to get the next issue
-2. Builds prompts from `.ralph/prompts/*.md` + runtime context
-3. Pipes to `claude --dangerously-skip-permissions --print`
-4. Checks for `<promise>COMPLETE</promise>` signal
-5. Repeats until done or max iterations reached
+## Required Workflow For Changes
 
-## Development Guidelines
+1. Make the smallest change that preserves invariants.
+2. Update docs when behavior/flags/layout change.
+3. Validate locally:
+   - `cargo check`
+4. Validate loop behavior in a throwaway Beads repo (not this repo):
+   - `cargo run --bin ralph -- --dry-run`
+   - `cargo run --bin ralph -- --dry-run --verbose`
 
-### Testing Changes
+## Prompt-Change Workflow (High Impact)
 
-Always test loop changes with dry-run first:
+When editing `prompts/*.md`:
 
-```bash
-cargo run --bin ralph -- --dry-run
-cargo run --bin ralph -- --dry-run --verbose
-```
+1. Keep instructions explicit and testable.
+2. Keep `bd` command usage accurate.
+3. Avoid ambiguous language that could widen execution scope.
+4. Run throwaway-repo dry-run checks before merge.
 
-### Modifying the Rust CLI
+## Things To Avoid
 
-- Keep the loop logic simple and predictable
-- All Claude interaction goes through stdin pipe (no interactive mode)
-- Exit codes: 0 = continue, 100 = all complete, other = error
-- The `--dangerously-skip-permissions` flag is always used for autonomous operation
+- Do not silently change loop semantics while making refactors.
+- Do not couple unrelated behavior changes in one PR.
+- Do not introduce interactive Claude flows.
+- Do not remove or weaken issue-close guardrails without explicit rationale in docs/PR notes.
 
-### Modifying prompt templates
-
-- These files are the agent's "brain" - changes affect all target projects
-- Keep instructions clear and unambiguous
-- The `bd` command reference section is critical - keep it accurate
-- Test prompt changes on a throwaway repo first
-
-### Key Behaviors to Preserve
-
-1. **Issue selection**: Always uses `bd ready` (priority-sorted, unblocked)
-2. **Completion signal**: `<promise>COMPLETE</promise>` triggers clean exit
-3. **Progress logging**: Append-only to `progress.txt`
-4. **Archiving**: Previous runs archived before new run starts
-
-## Dependencies
-
-- `claude` CLI (Claude Code)
-- `bd` CLI (Beads)
-- Rust toolchain
-
-## Common Tasks
+## Common Update Patterns
 
 ### Adding a new CLI flag
 
-1. Add to `src/cli.rs` (`Cli` struct)
-2. Wire behavior in `src/main.rs` (or a submodule)
-3. Document in README.md
+1. Add the flag to `src/cli.rs`.
+2. Apply behavior in `src/main.rs` / `src/settings.rs` / relevant module.
+3. Document the flag and examples in `README.md`.
 
-### Changing the prompt format
+### Changing prompt composition
 
-The main issue prompt is built in `build_prompt()`. It concatenates:
-1. Shared prompt from `.ralph/prompts/ralph.md`
-2. Issue-mode prompt from `.ralph/prompts/issue.md`
-3. Runtime context sections (issue details, rules.md, progress log, and instructions)
+Prompt composition lives in `src/prompts.rs`:
 
-### Debugging Claude interactions
+1. `build_issue_prompt()`
+2. `build_cleanup_prompt()`
+3. `build_reflection_prompt()`
 
-Use `--verbose` to see issue details before each Claude call. The full prompt is visible in dry-run mode.
+Ensure shared prompt + mode prompt + runtime context remain clearly separated.

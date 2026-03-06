@@ -1,32 +1,61 @@
 # Ralph Beads
 
-An automated workflow that uses Claude Code to iteratively process Beads issues.
+`ralph` is a Rust CLI that runs autonomous Claude Code loops on Beads issues.
 
-## Overview
+## How it works
 
-Ralph runs an issue loop:
-1. Reads the next ready issue from Beads (`bd ready`)
-2. Builds a composed prompt from:
-   - `.ralph/prompts/ralph.md` (shared meta rules)
-   - `.ralph/prompts/issue.md` (issue-mode instructions)
-   - runtime issue/progress/rules context
-3. Sends the prompt to `claude --dangerously-skip-permissions --print`
-4. Claude implements and closes the issue
-5. Repeats until done or `<promise>COMPLETE</promise>` is emitted
+1. Fetches the next ready issue via `bd ready`
+2. Builds a prompt from:
+   - `.ralph/prompts/ralph.md` (shared rules)
+   - `.ralph/prompts/issue.md` (issue mode)
+   - runtime issue/rules/progress context
+3. Runs `claude --dangerously-skip-permissions --print`
+4. Detects completion (`<promise>COMPLETE</promise>`) or continues to the next issue
+
+## Repository layout
+
+```text
+ralph-beads/
+├── AGENTS.md
+├── CLAUDE.md
+├── docs/
+│   └── TODO.md
+├── prompts/
+│   ├── ralph.md
+│   ├── issue.md
+│   ├── cleanup.md
+│   ├── quality-check.md
+│   ├── code-review-check.md
+│   └── validation-check.md
+├── src/
+└── .github/
+    ├── CONTRIBUTING.md
+    ├── CODE_OF_CONDUCT.md
+    ├── SECURITY.md
+    └── workflows/
+        ├── ci.yml
+        └── dependency-audit.yml
+```
 
 ## Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/claude-code) installed and authenticated
-- `bd` (Beads) installed
+- [Claude Code CLI](https://docs.anthropic.com/claude-code)
+- `bd` (Beads)
+- Rust toolchain
 
-## Installation
+## Beads setup (`bd` + Dolt)
+
+- Beads repo: [steveyegge/beads](https://github.com/steveyegge/beads)
+- Beads install/setup docs: [Installation](https://steveyegge.github.io/beads/getting-started/installation/) and [Quick Start](https://steveyegge.github.io/beads/getting-started/quickstart/)
+- Dolt backend docs (used by Beads): [What Is Dolt?](https://docs.dolthub.com/introduction/what-is-dolt)
+
+## Install
 
 ```bash
-git clone https://github.com/youruser/ralph-beads.git
-cargo install --path /path/to/ralph-beads --bin ralph --force
+cargo install --path . --bin ralph --force
 ```
 
-## Setup (per project)
+## Project setup (target repo)
 
 ```bash
 cd your-project
@@ -35,88 +64,66 @@ $EDITOR .ralph/prompts/issue.md
 $EDITOR AGENTS.md
 ```
 
+Behavior notes:
+- `ralph init` auto-runs `bd init` only when `.beads` is missing.
+- If `.beads` already exists, `ralph init` leaves it unchanged.
+- If `.ralph` already exists, `ralph init` exits with an error and does not overwrite existing Ralph files.
+- `ralph doctor` and `ralph upgrade-prompts` also ensure `.beads` exists (they run `bd init` only if needed).
+- Normal loop commands (`ralph`, `ralph --dry-run`, etc.) do not auto-initialize Beads; they fail fast if `.beads` is missing.
+
 ## Usage
 
 ```bash
-# Standard loop (default 10 iterations)
+# Default loop (10 iterations)
 ralph
 
 # Custom iteration budget
 ralph --iterations 20
 
-# Process one issue
+# Single issue
 ralph --once
 
-# Dry-run prompt output
+# Prompt dry-run
 ralph --dry-run
 
-# Skip issue snapshot consistency checks (startup + preflight)
+# Enable/disable issue snapshot consistency checks
+ralph --snapshot-consistency
 ralph --skip-snapshot-consistency
 
-# Enable issue snapshot consistency checks (off by default)
-ralph --snapshot-consistency
-
-# Verbose activity output
+# Verbose output
 ralph --verbose
 
-# Recovery pass for interrupted work
+# One-off passes
 ralph cleanup
-
-# Run reflection once, then exit
 ralph reflect
 
-# Run reflection suite every 3 iterations
+# Run reflection suite every N iterations
 ralph --reflect-every 3
 
-# Repair missing Ralph files/layout
+# Project health/layout checks
 ralph doctor
-
-# Validate environment and project health before runs
 ralph preflight
 
-# Upgrade prompt templates safely (with backup)
+# Upgrade prompt templates in target project
 ralph upgrade-prompts
 
-# Print last run summary
+# Last run summary
 ralph summary
-
-# Print summary as JSON
 ralph summary --json
 
-# Show binary version with commit + dirty state
+# Version
 ralph --version
 ```
 
-## Cleanup Behavior
+## Cleanup + reflection
 
-- `cleanup` runs a dedicated cleanup prompt pass (`.ralph/prompts/cleanup.md`) and exits.
-- If no interrupted issue is detected, `cleanup` exits as a no-op.
-- Normal loop runs now auto-detect interrupted in-progress work from the previous run log and executes one cleanup pass before continuing.
-
-## Reflection Behavior
-
-- `reflect` runs three passes and exits:
+- `ralph cleanup` runs `.ralph/prompts/cleanup.md` once, then exits.
+- `ralph reflect` runs all reflection prompts once, then exits:
   - `.ralph/prompts/quality-check.md`
   - `.ralph/prompts/code-review-check.md`
   - `.ralph/prompts/validation-check.md`
-- `--reflect-every N` runs the same three passes every `N` loop iterations.
 
-## Files
-
-Repository defaults:
-
-```text
-ralph-beads/
-├── ralph.md
-├── issue.md
-├── cleanup.md
-├── quality-check.md
-├── code-review-check.md
-├── validation-check.md
-└── src/
-```
-
-Project layout after `ralph init`:
+## Files created in target projects
 
 ```text
 your-project/
@@ -140,57 +147,19 @@ your-project/
     └── .last-run
 ```
 
-`ralph init` and `ralph doctor` will scaffold `AGENTS.md` if it does not exist.
+`ralph init` and `ralph doctor` scaffold `AGENTS.md` if missing.
 
-## Progress Tracking
-
-Ralph automatically:
-- Appends progress to `.ralph/progress.txt`
-- Archives previous run logs in `.ralph/archive/`
-- Writes debug logs in `.ralph/logs/` when `--debug` is enabled
-- Writes run state in `.ralph/state.json` and prevents concurrent runs with `.ralph/run.lock`
-- Maintains a last-known issue snapshot in `.ralph/issue-snapshot.json` and checks for unexpected issue ID loss in preflight/startup
-
-Add to project `.gitignore`:
-
-```gitignore
-.ralph/progress.txt
-.ralph/archive/
-.ralph/.last-run
-.ralph/logs/
-.ralph/state.json
-.ralph/issue-snapshot.json
-.ralph/run.lock
-```
-
-## Environment Variables
-
-- `RALPH_MAX_ITERATIONS` overrides the default iteration budget.
-
-## Versioning And Updates
-
-- Ralph uses semantic versioning in `Cargo.toml` and includes build metadata in `--version`.
-- `ralph --version` prints:
-  - package version (for example `0.1.1`)
-  - git commit short SHA
-  - working tree state (`clean` or `dirty`)
-- To ensure your installed binary is current after pulling changes:
+## Local development
 
 ```bash
-cargo install --path /path/to/ralph-beads --bin ralph --force
-ralph --version
+make check
+cargo run --bin ralph -- --dry-run
+cargo run --bin ralph -- --dry-run --verbose
 ```
 
-- If you are working in this repo, you can also run:
+## Config
 
-```bash
-make version
-make verify-installed-version
-```
-
-## Project Config
-
-Ralph supports per-project defaults in `.ralph/config.toml`:
+Per-project config is read from `.ralph/config.toml`:
 
 ```toml
 max_iterations = 10
@@ -203,11 +172,18 @@ close_guardrail_mode = "warn" # warn | strict
 snapshot_consistency_enabled = false
 ```
 
-CLI flags still take precedence over config values.
-`close_guardrail_mode` validates that each issue-loop iteration closes only the active issue (`warn` by default, `strict` to stop after violating iterations). Reflection/cleanup passes are excluded.
-Snapshot consistency checks are disabled by default unless enabled via `--snapshot-consistency` or `snapshot_consistency_enabled = true`.
-Use `--skip-snapshot-consistency` to override and disable checks even if config enables them.
+CLI flags override config values.
 
 ## Safety
 
-Ralph uses `--dangerously-skip-permissions` for autonomous operation. Run only in trusted repositories and review all changes.
+Ralph uses `--dangerously-skip-permissions` for autonomous operation. Only run in trusted repos.
+
+## License
+
+This project is released under the **Apache License 2.0**.
+
+## Contributing and policies
+
+- Contribution guide: [`.github/CONTRIBUTING.md`](./.github/CONTRIBUTING.md)
+- Code of conduct: [`.github/CODE_OF_CONDUCT.md`](./.github/CODE_OF_CONDUCT.md)
+- Security policy: [`.github/SECURITY.md`](./.github/SECURITY.md)

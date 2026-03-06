@@ -45,12 +45,12 @@ use crate::cli::{Cli, Paths};
 use crate::run_state::{RunState, RunStateGuard};
 use crate::settings::{CloseGuardrailMode, RalphConfig, RuntimeSettings};
 
-const DEFAULT_META_PROMPT: &str = include_str!("../ralph.md");
-const DEFAULT_ISSUE_PROMPT: &str = include_str!("../issue.md");
-const DEFAULT_CLEANUP_PROMPT: &str = include_str!("../cleanup.md");
-const DEFAULT_QUALITY_CHECK_PROMPT: &str = include_str!("../quality-check.md");
-const DEFAULT_CODE_REVIEW_CHECK_PROMPT: &str = include_str!("../code-review-check.md");
-const DEFAULT_VALIDATION_CHECK_PROMPT: &str = include_str!("../validation-check.md");
+const DEFAULT_META_PROMPT: &str = include_str!("../prompts/ralph.md");
+const DEFAULT_ISSUE_PROMPT: &str = include_str!("../prompts/issue.md");
+const DEFAULT_CLEANUP_PROMPT: &str = include_str!("../prompts/cleanup.md");
+const DEFAULT_QUALITY_CHECK_PROMPT: &str = include_str!("../prompts/quality-check.md");
+const DEFAULT_CODE_REVIEW_CHECK_PROMPT: &str = include_str!("../prompts/code-review-check.md");
+const DEFAULT_VALIDATION_CHECK_PROMPT: &str = include_str!("../prompts/validation-check.md");
 static FULL_ACTIVITY_TEXT: AtomicBool = AtomicBool::new(false);
 static RUNTIME_SETTINGS: OnceLock<RuntimeSettings> = OnceLock::new();
 const MAX_LOG_LINES: usize = 200;
