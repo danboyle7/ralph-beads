@@ -92,6 +92,27 @@ pub(crate) fn get_issue_status_map() -> Result<HashMap<String, String>> {
         .unwrap_or_default())
 }
 
+pub(crate) fn get_issue_type_map() -> Result<HashMap<String, String>> {
+    let output = run_bd_query(
+        ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
+        "issue type map",
+    )?;
+    let value: Value = serde_json::from_str(&output).context("failed to parse bd list JSON")?;
+    Ok(value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("id").and_then(Value::as_str)?;
+                    let issue_type = issue_type_from_item(item)?;
+                    Some((id.to_string(), issue_type))
+                })
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default())
+}
+
 pub(crate) fn newly_closed_issue_ids(
     before: &HashMap<String, String>,
     after: &HashMap<String, String>,
@@ -237,6 +258,15 @@ pub(crate) fn get_issue_details(issue_id: &str) -> Result<String> {
         .or_else(|_| Ok(format!("Issue: {issue_id}")))
 }
 
+pub(crate) fn get_issue_type(issue_id: &str) -> Result<Option<String>> {
+    let output = run_bd_query(
+        ["bd", "show", issue_id, "--json", "--no-pager"],
+        "issue type lookup",
+    )?;
+    let value: Value = serde_json::from_str(&output).context("failed to parse bd show JSON")?;
+    Ok(issue_type_from_show_value(&value))
+}
+
 pub(crate) fn is_non_closed_issue(issue_id: &str) -> Result<bool> {
     let output = run_bd_query(
         ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
@@ -347,4 +377,32 @@ fn status_is_closed(status: Option<&String>) -> bool {
     status
         .map(|value| value.eq_ignore_ascii_case("closed"))
         .unwrap_or(false)
+}
+
+fn issue_type_from_show_value(value: &Value) -> Option<String> {
+    issue_type_from_item(value)
+        .or_else(|| value.get("issue").and_then(issue_type_from_item))
+        .or_else(|| {
+            value
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(issue_type_from_item)
+        })
+}
+
+fn issue_type_from_item(item: &Value) -> Option<String> {
+    [item.get("type"), item.get("issue_type"), item.get("kind")]
+        .into_iter()
+        .flatten()
+        .find_map(json_value_to_label)
+}
+
+fn json_value_to_label(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_ascii_lowercase());
+    }
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|text| text.to_ascii_lowercase())
 }

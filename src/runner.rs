@@ -477,6 +477,45 @@ pub(super) fn worker_main(
                 let remaining = get_remaining_issue_count().unwrap_or(0);
                 if remaining == 0 {
                     completed_issues += 1;
+                    let closed_epics = if settings.reflect_every_epic {
+                        newly_closed_epic_ids(&issue_status_before, &ui_tx, &mut debug_logs)
+                    } else {
+                        Vec::new()
+                    };
+                    if !closed_epics.is_empty() && !graceful_quit.load(Ordering::Relaxed) {
+                        let reason_text = format!("epic completed ({})", closed_epics.join(", "));
+                        log_progress(
+                            &paths,
+                            &ui_tx,
+                            format!(
+                                "Iteration {iteration}: Running reflection suite ({reason_text})"
+                            ),
+                        )?;
+                        run_reflection_suite(
+                            &cli,
+                            &paths,
+                            &ui_tx,
+                            &mut debug_logs,
+                            &format!("iteration {iteration}/{total_iterations}; {reason_text}"),
+                        )?;
+                        open_count = get_open_issue_count().unwrap_or(open_count);
+                        send(
+                            &ui_tx,
+                            UiEvent::Summary(format_run_stats(
+                                &run_id,
+                                open_count,
+                                completed_issues,
+                                failed_issues,
+                                iteration,
+                                total_iterations,
+                            )),
+                        );
+                        log_progress(
+                            &paths,
+                            &ui_tx,
+                            format!("Iteration {iteration}: Reflection suite completed"),
+                        )?;
+                    }
                     open_count = 0;
                     send(
                         &ui_tx,
@@ -581,38 +620,55 @@ pub(super) fn worker_main(
             }
         }
 
-        if let Some(every) = settings.reflect_every {
-            if iteration % every == 0 && !graceful_quit.load(Ordering::Relaxed) {
-                log_progress(
-                    &paths,
-                    &ui_tx,
-                    format!("Iteration {iteration}: Running scheduled reflection suite"),
-                )?;
-                run_reflection_suite(
-                    &cli,
-                    &paths,
-                    &ui_tx,
-                    &mut debug_logs,
-                    &format!("iteration {iteration}/{total_iterations}"),
-                )?;
-                open_count = get_open_issue_count().unwrap_or(open_count);
-                send(
-                    &ui_tx,
-                    UiEvent::Summary(format_run_stats(
-                        &run_id,
-                        open_count,
-                        completed_issues,
-                        failed_issues,
-                        iteration,
-                        total_iterations,
-                    )),
-                );
-                log_progress(
-                    &paths,
-                    &ui_tx,
-                    format!("Iteration {iteration}: Reflection suite completed"),
-                )?;
+        let closed_epics = if settings.reflect_every_epic {
+            newly_closed_epic_ids(&issue_status_before, &ui_tx, &mut debug_logs)
+        } else {
+            Vec::new()
+        };
+        let iteration_reflection_due = settings
+            .reflect_every
+            .is_some_and(|every| iteration % every == 0);
+        let should_reflect = (!closed_epics.is_empty() || iteration_reflection_due)
+            && !graceful_quit.load(Ordering::Relaxed);
+
+        if should_reflect {
+            let mut reasons = Vec::new();
+            if !closed_epics.is_empty() {
+                reasons.push(format!("epic completed ({})", closed_epics.join(", ")));
             }
+            if iteration_reflection_due {
+                reasons.push("scheduled interval".to_string());
+            }
+            let reason_text = reasons.join("; ");
+            log_progress(
+                &paths,
+                &ui_tx,
+                format!("Iteration {iteration}: Running reflection suite ({reason_text})"),
+            )?;
+            run_reflection_suite(
+                &cli,
+                &paths,
+                &ui_tx,
+                &mut debug_logs,
+                &format!("iteration {iteration}/{total_iterations}; {reason_text}"),
+            )?;
+            open_count = get_open_issue_count().unwrap_or(open_count);
+            send(
+                &ui_tx,
+                UiEvent::Summary(format_run_stats(
+                    &run_id,
+                    open_count,
+                    completed_issues,
+                    failed_issues,
+                    iteration,
+                    total_iterations,
+                )),
+            );
+            log_progress(
+                &paths,
+                &ui_tx,
+                format!("Iteration {iteration}: Reflection suite completed"),
+            )?;
         }
 
         if graceful_quit.load(Ordering::Relaxed) {
@@ -755,11 +811,83 @@ pub(super) fn get_issue_status_map() -> Result<HashMap<String, String>> {
     issues::get_issue_status_map()
 }
 
+pub(super) fn get_issue_type_map() -> Result<HashMap<String, String>> {
+    issues::get_issue_type_map()
+}
+
+pub(super) fn get_issue_type(issue_id: &str) -> Result<Option<String>> {
+    issues::get_issue_type(issue_id)
+}
+
 pub(super) fn newly_closed_issue_ids(
     before: &HashMap<String, String>,
     after: &HashMap<String, String>,
 ) -> Vec<String> {
     issues::newly_closed_issue_ids(before, after)
+}
+
+pub(super) fn newly_closed_epic_ids(
+    before_statuses: &Option<HashMap<String, String>>,
+    ui_tx: &Sender<UiEvent>,
+    debug_logs: &mut Option<DebugLogs>,
+) -> Vec<String> {
+    let Some(before) = before_statuses.as_ref() else {
+        return Vec::new();
+    };
+
+    let after = match get_issue_status_map() {
+        Ok(map) => map,
+        Err(error) => {
+            send_activity(
+                ui_tx,
+                debug_logs,
+                format!("WARN: Unable to detect newly closed epics: {error}"),
+            );
+            return Vec::new();
+        }
+    };
+    let newly_closed = newly_closed_issue_ids(before, &after);
+    if newly_closed.is_empty() {
+        return Vec::new();
+    }
+
+    let issue_types = match get_issue_type_map() {
+        Ok(map) => map,
+        Err(error) => {
+            send_activity(
+                ui_tx,
+                debug_logs,
+                format!("WARN: Unable to load issue types for epic reflection: {error}"),
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut epic_ids = newly_closed
+        .into_iter()
+        .filter(|id| {
+            let issue_type = issue_types
+                .get(id)
+                .cloned()
+                .or_else(|| match get_issue_type(id) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        send_activity(
+                            ui_tx,
+                            debug_logs,
+                            format!("WARN: Unable to look up type for `{id}`: {error}"),
+                        );
+                        None
+                    }
+                });
+            issue_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("epic"))
+        })
+        .collect::<Vec<String>>();
+    epic_ids.sort();
+    epic_ids.dedup();
+    epic_ids
 }
 
 pub(super) fn enforce_single_issue_close_guardrail(

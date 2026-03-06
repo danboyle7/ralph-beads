@@ -208,6 +208,7 @@ fn default_config_contents() -> &'static str {
 \n\
 # max_iterations = 10\n\
 # reflect_every = 3\n\
+# reflect_every_epic = false\n\
 # capture_timeout_seconds = 30\n\
 # capture_retries = 1\n\
 # claude_timeout_minutes = 30\n\
