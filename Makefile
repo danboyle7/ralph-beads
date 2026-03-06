@@ -24,6 +24,9 @@ release:
 run:
 	$(CARGO) run --bin ralph --
 
+format:
+	$(CARGO) fmt --all
+
 check:
 	$(CARGO) check
 

@@ -85,6 +85,7 @@ ralph --once
 
 # Prompt dry-run
 ralph --dry-run
+# (prints prompts only; skips close-guardrail verification)
 
 # Enable/disable issue snapshot consistency checks
 ralph --snapshot-consistency

@@ -391,17 +391,26 @@ pub(super) fn worker_main(
         }
 
         let prompt = build_prompt(&paths, &issue_id, &issue_details);
-        let issue_status_before = match get_issue_status_map() {
-            Ok(map) => Some(map),
-            Err(error) => {
-                send_activity(
-                    &ui_tx,
-                    &mut debug_logs,
-                    format!(
-                        "WARN: Unable to capture issue status baseline for close guardrail: {error}"
-                    ),
-                );
-                None
+        let issue_status_before = if cli.dry_run {
+            send_activity(
+                &ui_tx,
+                &mut debug_logs,
+                "Dry run: skipping close guardrail verification for this iteration".to_string(),
+            );
+            None
+        } else {
+            match get_issue_status_map() {
+                Ok(map) => Some(map),
+                Err(error) => {
+                    send_activity(
+                        &ui_tx,
+                        &mut debug_logs,
+                        format!(
+                            "WARN: Unable to capture issue status baseline for close guardrail: {error}"
+                        ),
+                    );
+                    None
+                }
             }
         };
         emit_iteration_output_boundary(

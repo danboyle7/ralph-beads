@@ -397,10 +397,7 @@ impl UiApp {
             let extra = if entry.status == LiveCallStatus::Running {
                 entry.preview.as_deref()
             } else {
-                entry
-                    .summary
-                    .as_deref()
-                    .or(entry.preview.as_deref())
+                entry.summary.as_deref().or(entry.preview.as_deref())
             };
             if let Some(text) = extra {
                 if entry.status == LiveCallStatus::Running {
@@ -828,10 +825,7 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
                 let snippet = if update.status == LiveCallStatus::Running {
                     update.preview.as_deref()
                 } else {
-                    update
-                        .summary
-                        .as_deref()
-                        .or(update.preview.as_deref())
+                    update.summary.as_deref().or(update.preview.as_deref())
                 };
                 eprintln!(
                     "[subagent_call] {} | status={} | runtime={}{}",
@@ -912,12 +906,13 @@ fn live_tui_loop(
                 CEvent::Key(key) => {
                     if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                         app.should_quit = true;
-                    } else if matches!(key.code, KeyCode::Char('Q'))
-                        && !app.graceful_quit_requested
+                    } else if matches!(key.code, KeyCode::Char('Q')) && !app.graceful_quit_requested
                     {
                         graceful_quit.store(true, Ordering::Relaxed);
                         app.graceful_quit_requested = true;
-                        app.footer = "Graceful stop requested. Ralph will exit after the current iteration.".to_string();
+                        app.footer =
+                            "Graceful stop requested. Ralph will exit after the current iteration."
+                                .to_string();
                         app.push_activity("Graceful stop requested by user".to_string());
                     }
                 }
