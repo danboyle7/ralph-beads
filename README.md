@@ -103,6 +103,9 @@ ralph reflect
 # Run reflection suite every N iterations
 ralph --reflect-every 3
 
+# Run reflection suite when an epic issue is closed
+ralph --reflect-every-epic
+
 # Project health/layout checks
 ralph doctor
 ralph preflight
@@ -185,6 +188,7 @@ Per-project config is read from `.ralph/config.toml`:
 ```toml
 max_iterations = 10
 reflect_every = 3
+reflect_every_epic = false
 capture_timeout_seconds = 30
 capture_retries = 1
 claude_timeout_minutes = 30

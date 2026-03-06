@@ -20,6 +20,7 @@ const DEFAULT_CLAUDE_RETRIES: usize = 1;
 pub(crate) struct RalphConfig {
     pub(crate) max_iterations: Option<usize>,
     pub(crate) reflect_every: Option<usize>,
+    pub(crate) reflect_every_epic: Option<bool>,
     pub(crate) capture_timeout_seconds: Option<u64>,
     pub(crate) capture_retries: Option<usize>,
     pub(crate) claude_timeout_minutes: Option<u64>,
@@ -32,6 +33,7 @@ pub(crate) struct RalphConfig {
 pub(crate) struct RuntimeSettings {
     pub(crate) max_iterations: usize,
     pub(crate) reflect_every: Option<usize>,
+    pub(crate) reflect_every_epic: bool,
     pub(crate) capture_timeout: Duration,
     pub(crate) capture_retries: usize,
     pub(crate) claude_timeout: Duration,
@@ -50,6 +52,7 @@ pub(crate) fn default_runtime_settings() -> RuntimeSettings {
     RuntimeSettings {
         max_iterations: DEFAULT_MAX_ITERATIONS,
         reflect_every: None,
+        reflect_every_epic: false,
         capture_timeout: Duration::from_secs(DEFAULT_CAPTURE_TIMEOUT_SECONDS),
         capture_retries: DEFAULT_CAPTURE_RETRIES,
         claude_timeout: Duration::from_secs(DEFAULT_CLAUDE_TIMEOUT_MINUTES * 60),
@@ -101,6 +104,9 @@ pub(crate) fn load_config(paths: &Paths) -> Result<RalphConfig> {
                     config.reflect_every = Some(parsed);
                 }
             }
+            "reflect_every_epic" => {
+                config.reflect_every_epic = parse_bool(value);
+            }
             "capture_timeout_seconds" => {
                 if let Ok(parsed) = value.parse::<u64>() {
                     config.capture_timeout_seconds = Some(parsed);
@@ -145,10 +151,12 @@ pub(crate) fn resolve_runtime_settings(cli: &mut Cli, config: &RalphConfig) -> R
         .or(config.max_iterations)
         .unwrap_or(DEFAULT_MAX_ITERATIONS);
     let reflect_every = cli.reflect_every.or(config.reflect_every);
+    let reflect_every_epic = cli.reflect_every_epic || config.reflect_every_epic.unwrap_or(false);
 
     RuntimeSettings {
         max_iterations,
         reflect_every,
+        reflect_every_epic,
         capture_timeout: Duration::from_secs(
             config
                 .capture_timeout_seconds
@@ -192,6 +200,14 @@ pub(crate) fn validate_cli_arguments(cli: &Cli, settings: &RuntimeSettings) -> R
 
     if cli.reflect && cli.reflect_every.is_some() {
         bail!("--reflect and --reflect-every cannot be used together");
+    }
+
+    if cli.cleanup && settings.reflect_every_epic {
+        bail!("--cleanup and --reflect-every-epic cannot be used together");
+    }
+
+    if cli.reflect && settings.reflect_every_epic {
+        bail!("--reflect and --reflect-every-epic cannot be used together");
     }
 
     if cli.snapshot_consistency && cli.skip_snapshot_consistency {
@@ -349,6 +365,7 @@ pub(crate) fn run_preflight(
             "settings": {
                 "max_iterations": settings.max_iterations,
                 "reflect_every": settings.reflect_every,
+                "reflect_every_epic": settings.reflect_every_epic,
                 "capture_timeout_seconds": settings.capture_timeout.as_secs(),
                 "capture_retries": settings.capture_retries,
                 "claude_timeout_seconds": settings.claude_timeout.as_secs(),

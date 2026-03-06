@@ -41,6 +41,8 @@ pub(crate) struct Cli {
     pub(crate) reflect: bool,
     #[arg(long, value_name = "N", global = true)]
     pub(crate) reflect_every: Option<usize>,
+    #[arg(long, global = true)]
+    pub(crate) reflect_every_epic: bool,
     #[arg(long, hide = true, global = true)]
     pub(crate) summary: bool,
     #[arg(long, hide = true, global = true)]

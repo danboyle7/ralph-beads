@@ -27,6 +27,9 @@ run:
 format:
 	$(CARGO) fmt --all
 
+lint:
+	$(CARGO) clippy --all-targets --all-features --locked -- -D warnings
+
 check:
 	$(CARGO) check
 
