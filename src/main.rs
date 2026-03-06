@@ -129,22 +129,16 @@ struct SubagentUiEntry {
     duration_ms: Option<u128>,
 }
 
-struct CleanupGuard {
-    enabled: bool,
-}
+struct CleanupGuard;
 
 impl CleanupGuard {
-    fn new(enabled: bool) -> Self {
-        Self { enabled }
+    fn new(_enabled: bool) -> Self {
+        Self
     }
 }
 
 impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        if !self.enabled {
-            return;
-        }
-    }
+    fn drop(&mut self) {}
 }
 
 #[derive(Clone)]
@@ -406,7 +400,7 @@ impl UiApp {
                 entry
                     .summary
                     .as_deref()
-                    .or_else(|| entry.preview.as_deref())
+                    .or(entry.preview.as_deref())
             };
             if let Some(text) = extra {
                 if entry.status == LiveCallStatus::Running {
@@ -785,7 +779,7 @@ impl DebugLogs {
 }
 
 fn compact_text(value: &str, max_chars: usize) -> String {
-    let normalized = value.replace('\n', " ").replace('\r', " ");
+    let normalized = value.replace(['\n', '\r'], " ");
     let mut compact = normalized
         .split_whitespace()
         .collect::<Vec<&str>>()
@@ -837,7 +831,7 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
                     update
                         .summary
                         .as_deref()
-                        .or_else(|| update.preview.as_deref())
+                        .or(update.preview.as_deref())
                 };
                 eprintln!(
                     "[subagent_call] {} | status={} | runtime={}{}",
@@ -918,13 +912,13 @@ fn live_tui_loop(
                 CEvent::Key(key) => {
                     if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                         app.should_quit = true;
-                    } else if matches!(key.code, KeyCode::Char('Q')) {
-                        if !app.graceful_quit_requested {
-                            graceful_quit.store(true, Ordering::Relaxed);
-                            app.graceful_quit_requested = true;
-                            app.footer = "Graceful stop requested. Ralph will exit after the current iteration.".to_string();
-                            app.push_activity("Graceful stop requested by user".to_string());
-                        }
+                    } else if matches!(key.code, KeyCode::Char('Q'))
+                        && !app.graceful_quit_requested
+                    {
+                        graceful_quit.store(true, Ordering::Relaxed);
+                        app.graceful_quit_requested = true;
+                        app.footer = "Graceful stop requested. Ralph will exit after the current iteration.".to_string();
+                        app.push_activity("Graceful stop requested by user".to_string());
                     }
                 }
                 CEvent::Mouse(mouse) => {
@@ -1017,7 +1011,7 @@ fn wrapped_row_count_for_line(line: &str, width: usize) -> usize {
         return 0;
     }
     let chars = line.chars().count();
-    (chars / width).max(1) + usize::from(chars % width != 0 && chars >= width)
+    chars.div_ceil(width).max(1)
 }
 
 fn wrapped_row_count_for_lines(lines: &VecDeque<String>, area: Rect) -> usize {

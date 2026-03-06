@@ -194,7 +194,7 @@ fn run_claude_once(
     }
 
     if let Some(rate_limit) = render_state.rate_limit_event.take() {
-        if !(render_state.saw_success_result || !rate_limit.is_blocking()) {
+        if !render_state.saw_success_result && rate_limit.is_blocking() {
             return Ok(ClaudeOutcome::RateLimited(rate_limit));
         }
     }
@@ -398,16 +398,9 @@ impl ToolLifecycleTracker {
         &mut self,
         event: &Value,
     ) -> Option<(String, String, Option<Value>)> {
-        let index = match event.get("index").and_then(Value::as_u64) {
-            Some(index) => index,
-            None => return None,
-        };
-        let Some(tool_id) = self.by_block_index.remove(&index) else {
-            return None;
-        };
-        let Some(call) = self.by_tool_id.get_mut(&tool_id) else {
-            return None;
-        };
+        let index = event.get("index").and_then(Value::as_u64)?;
+        let tool_id = self.by_block_index.remove(&index)?;
+        let call = self.by_tool_id.get_mut(&tool_id)?;
         if call.input_value.is_none() && !call.input_buffer.trim().is_empty() {
             if let Ok(input) = serde_json::from_str::<Value>(&call.input_buffer) {
                 call.input_value = Some(input);
@@ -711,7 +704,7 @@ fn process_claude_line(
     send_output_chunk(ui_tx, debug_logs, text);
 }
 
-fn stream_event_value<'a>(value: &'a Value) -> Option<&'a Value> {
+fn stream_event_value(value: &Value) -> Option<&Value> {
     if value.get("type").and_then(Value::as_str) == Some("stream_event") {
         value.get("event")
     } else {
@@ -1804,7 +1797,7 @@ fn compact_json(value: &Value, max_chars: usize) -> Option<String> {
         .map(|raw| compact_text(&raw, max_chars))
 }
 
-fn event_tool_name<'a>(event: Option<&'a Value>) -> Option<&'a str> {
+fn event_tool_name(event: Option<&Value>) -> Option<&str> {
     event
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str)

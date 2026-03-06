@@ -880,10 +880,12 @@ pub(super) fn run_reflection_suite(
         paths,
         ui_tx,
         debug_logs,
-        &paths.quality_check_prompt_file,
-        DEFAULT_QUALITY_CHECK_PROMPT,
-        "Quality Check",
-        "REFLECT-QUALITY",
+        ReflectionPassSpec {
+            prompt_path: &paths.quality_check_prompt_file,
+            fallback_prompt: DEFAULT_QUALITY_CHECK_PROMPT,
+            pass_name: "Quality Check",
+            pass_id: "REFLECT-QUALITY",
+        },
         trigger,
     )?;
     run_reflection_pass(
@@ -891,10 +893,12 @@ pub(super) fn run_reflection_suite(
         paths,
         ui_tx,
         debug_logs,
-        &paths.code_review_check_prompt_file,
-        DEFAULT_CODE_REVIEW_CHECK_PROMPT,
-        "Code Review Check",
-        "REFLECT-CODE-REVIEW",
+        ReflectionPassSpec {
+            prompt_path: &paths.code_review_check_prompt_file,
+            fallback_prompt: DEFAULT_CODE_REVIEW_CHECK_PROMPT,
+            pass_name: "Code Review Check",
+            pass_id: "REFLECT-CODE-REVIEW",
+        },
         trigger,
     )?;
     run_reflection_pass(
@@ -902,10 +906,12 @@ pub(super) fn run_reflection_suite(
         paths,
         ui_tx,
         debug_logs,
-        &paths.validation_check_prompt_file,
-        DEFAULT_VALIDATION_CHECK_PROMPT,
-        "Validation Check",
-        "REFLECT-VALIDATION",
+        ReflectionPassSpec {
+            prompt_path: &paths.validation_check_prompt_file,
+            fallback_prompt: DEFAULT_VALIDATION_CHECK_PROMPT,
+            pass_name: "Validation Check",
+            pass_id: "REFLECT-VALIDATION",
+        },
         trigger,
     )?;
     send_activity(
@@ -916,27 +922,37 @@ pub(super) fn run_reflection_suite(
     Ok(())
 }
 
+pub(super) struct ReflectionPassSpec<'a> {
+    pub(super) prompt_path: &'a Path,
+    pub(super) fallback_prompt: &'a str,
+    pub(super) pass_name: &'a str,
+    pub(super) pass_id: &'a str,
+}
+
 pub(super) fn run_reflection_pass(
     cli: &Cli,
     paths: &Paths,
     ui_tx: &Sender<UiEvent>,
     debug_logs: &mut Option<DebugLogs>,
-    prompt_path: &Path,
-    fallback_prompt: &str,
-    pass_name: &str,
-    pass_id: &str,
+    spec: ReflectionPassSpec<'_>,
     trigger: &str,
 ) -> Result<()> {
-    let prompt = build_reflection_prompt(paths, prompt_path, fallback_prompt, pass_name, trigger);
+    let prompt = build_reflection_prompt(
+        paths,
+        spec.prompt_path,
+        spec.fallback_prompt,
+        spec.pass_name,
+        trigger,
+    );
     if let Some(logs) = debug_logs.as_mut() {
-        logs.set_iteration_context(0, pass_id);
+        logs.set_iteration_context(0, spec.pass_id);
     }
     emit_named_output_boundary(
         ui_tx,
         debug_logs,
-        format!("Reflect | pass={pass_name} | trigger={trigger}"),
+        format!("Reflect | pass={} | trigger={trigger}", spec.pass_name),
     );
-    let _ = run_claude(cli, ui_tx, pass_id, &prompt, debug_logs)?;
+    let _ = run_claude(cli, ui_tx, spec.pass_id, &prompt, debug_logs)?;
     Ok(())
 }
 
