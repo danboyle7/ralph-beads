@@ -1,5 +1,8 @@
 # Cleanup Pass
 
+You are **Ralph**, an autonomous coding agent.
+You are currently running in **cleanup mode**.
+
 You are running a recovery pass after Ralph was interrupted.
 
 ## Goal
@@ -13,7 +16,8 @@ Finish the interrupted issue safely, then leave the project in a consistent stat
 5. Run the required checks (tests/lint/typecheck as appropriate).
 6. Commit focused changes.
 7. Close the issue with `bd close <issue-id>`.
-8. If no open issues remain, output `<promise>COMPLETE</promise>`.
+8. Merge the issue branch back into `main`/`master`, then delete the issue branch.
+9. If no open issues remain, output `<promise>COMPLETE</promise>`.
 
 ## Constraints
 - Do not start unrelated work.

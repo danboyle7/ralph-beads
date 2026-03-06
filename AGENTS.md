@@ -20,7 +20,6 @@ src/init.rs       # `ralph init` bootstrap logic
 src/summary.rs    # `ralph summary` rendering
 ralph.md          # Shared meta prompt template
 issue.md          # Issue-mode prompt template
-prompt.md         # Legacy compatibility prompt template
 cleanup.md        # Default cleanup pass template
 quality-check.md  # Default reflection quality template
 code-review-check.md # Default reflection code-review template
@@ -87,7 +86,7 @@ cargo run --bin ralph -- --dry-run --verbose
 
 The main issue prompt is built in `build_prompt()`. It concatenates:
 1. Shared prompt from `.ralph/prompts/ralph.md`
-2. Issue-mode prompt from `.ralph/prompts/issue.md` (legacy fallbacks supported)
+2. Issue-mode prompt from `.ralph/prompts/issue.md`
 3. Runtime context sections (issue details, rules.md, progress log, and instructions)
 
 ### Debugging Claude interactions

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::cli::Paths;
 
@@ -11,6 +11,68 @@ pub(crate) fn print_last_run_summary(paths: &Paths) -> Result<()> {
     for line in last_run_summary_lines(paths)? {
         println!("{line}");
     }
+    Ok(())
+}
+
+pub(crate) fn print_last_run_summary_json(paths: &Paths) -> Result<()> {
+    if !paths.progress_file.exists() {
+        bail!("No progress log found at {}", paths.progress_file.display());
+    }
+
+    let content = fs::read_to_string(&paths.progress_file)
+        .with_context(|| format!("failed to read {}", paths.progress_file.display()))?;
+
+    let mut run_id = String::from("unknown");
+    let mut started = String::from("unknown");
+    let mut max_iterations = String::from("unknown");
+    let mut completed = 0_usize;
+    let mut failed = 0_usize;
+    let mut processing = 0_usize;
+    let mut final_status = String::from("In progress");
+    let mut tail = VecDeque::new();
+
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("Run ID: ") {
+            run_id = value.to_string();
+        } else if let Some(value) = line.strip_prefix("Started: ") {
+            started = value.to_string();
+        } else if let Some(value) = line.strip_prefix("Max Iterations: ") {
+            max_iterations = value.to_string();
+        }
+
+        if line.contains("Processing issue") {
+            processing += 1;
+        }
+        if line.contains("Completed issue") {
+            completed += 1;
+        }
+        if line.contains("FAILED issue") {
+            failed += 1;
+        }
+        if line.contains("COMPLETE:") || line.contains("STOPPED:") {
+            final_status = line.to_string();
+        }
+
+        tail.push_back(line.to_string());
+        while tail.len() > 8 {
+            tail.pop_front();
+        }
+    }
+
+    let report = json!({
+        "run": {
+            "run_id": run_id,
+            "started": started,
+            "max_iterations": max_iterations,
+            "issues_started": processing,
+            "issues_completed": completed,
+            "issues_failed": failed,
+            "status": final_status,
+            "recent_log": tail.into_iter().collect::<Vec<String>>(),
+        },
+        "cross_run_lines": cross_run_lines(paths)?,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

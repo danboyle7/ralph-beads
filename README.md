@@ -32,6 +32,7 @@ cargo install --path /path/to/ralph-beads --bin ralph --force
 cd your-project
 ralph init
 $EDITOR .ralph/prompts/issue.md
+$EDITOR AGENTS.md
 ```
 
 ## Usage
@@ -49,6 +50,12 @@ ralph --once
 # Dry-run prompt output
 ralph --dry-run
 
+# Skip issue snapshot consistency checks (startup + preflight)
+ralph --skip-snapshot-consistency
+
+# Enable issue snapshot consistency checks (off by default)
+ralph --snapshot-consistency
+
 # Verbose activity output
 ralph --verbose
 
@@ -64,18 +71,31 @@ ralph --reflect-every 3
 # Repair missing Ralph files/layout
 ralph doctor
 
+# Validate environment and project health before runs
+ralph preflight
+
+# Upgrade prompt templates safely (with backup)
+ralph upgrade-prompts
+
 # Print last run summary
 ralph summary
+
+# Print summary as JSON
+ralph summary --json
+
+# Show binary version with commit + dirty state
+ralph --version
 ```
 
 ## Cleanup Behavior
 
 - `cleanup` runs a dedicated cleanup prompt pass (`.ralph/prompts/cleanup.md`) and exits.
+- If no interrupted issue is detected, `cleanup` exits as a no-op.
 - Normal loop runs now auto-detect interrupted in-progress work from the previous run log and executes one cleanup pass before continuing.
 
 ## Reflection Behavior
 
-- `reflect` runs two passes and exits:
+- `reflect` runs three passes and exits:
   - `.ralph/prompts/quality-check.md`
   - `.ralph/prompts/code-review-check.md`
   - `.ralph/prompts/validation-check.md`
@@ -89,7 +109,6 @@ Repository defaults:
 ralph-beads/
 ├── ralph.md
 ├── issue.md
-├── prompt.md (legacy compatibility template)
 ├── cleanup.md
 ├── quality-check.md
 ├── code-review-check.md
@@ -101,6 +120,7 @@ Project layout after `ralph init`:
 
 ```text
 your-project/
+├── AGENTS.md
 └── .ralph/
     ├── prompts/
     │   ├── ralph.md
@@ -108,12 +128,19 @@ your-project/
     │   ├── cleanup.md
     │   ├── quality-check.md
     │   ├── code-review-check.md
-    │   └── validation-check.md
+    │   ├── validation-check.md
+    │   └── .template-version
     ├── progress.txt
+    ├── state.json
+    ├── issue-snapshot.json
+    ├── run.lock
+    ├── config.toml
     ├── archive/
     ├── logs/
     └── .last-run
 ```
+
+`ralph init` and `ralph doctor` will scaffold `AGENTS.md` if it does not exist.
 
 ## Progress Tracking
 
@@ -121,6 +148,8 @@ Ralph automatically:
 - Appends progress to `.ralph/progress.txt`
 - Archives previous run logs in `.ralph/archive/`
 - Writes debug logs in `.ralph/logs/` when `--debug` is enabled
+- Writes run state in `.ralph/state.json` and prevents concurrent runs with `.ralph/run.lock`
+- Maintains a last-known issue snapshot in `.ralph/issue-snapshot.json` and checks for unexpected issue ID loss in preflight/startup
 
 Add to project `.gitignore`:
 
@@ -129,11 +158,55 @@ Add to project `.gitignore`:
 .ralph/archive/
 .ralph/.last-run
 .ralph/logs/
+.ralph/state.json
+.ralph/issue-snapshot.json
+.ralph/run.lock
 ```
 
 ## Environment Variables
 
 - `RALPH_MAX_ITERATIONS` overrides the default iteration budget.
+
+## Versioning And Updates
+
+- Ralph uses semantic versioning in `Cargo.toml` and includes build metadata in `--version`.
+- `ralph --version` prints:
+  - package version (for example `0.1.1`)
+  - git commit short SHA
+  - working tree state (`clean` or `dirty`)
+- To ensure your installed binary is current after pulling changes:
+
+```bash
+cargo install --path /path/to/ralph-beads --bin ralph --force
+ralph --version
+```
+
+- If you are working in this repo, you can also run:
+
+```bash
+make version
+make verify-installed-version
+```
+
+## Project Config
+
+Ralph supports per-project defaults in `.ralph/config.toml`:
+
+```toml
+max_iterations = 10
+reflect_every = 3
+capture_timeout_seconds = 30
+capture_retries = 1
+claude_timeout_minutes = 30
+claude_retries = 1
+close_guardrail_mode = "warn" # warn | strict
+snapshot_consistency_enabled = false
+```
+
+CLI flags still take precedence over config values.
+`close_guardrail_mode` validates that each issue-loop iteration closes only the active issue (`warn` by default, `strict` to stop after violating iterations). Reflection/cleanup passes are excluded.
+Snapshot consistency checks are disabled by default unless enabled via `--snapshot-consistency` or `snapshot_consistency_enabled = true`.
+Use `--skip-snapshot-consistency` to override and disable checks even if config enables them.
 
 ## Safety
 

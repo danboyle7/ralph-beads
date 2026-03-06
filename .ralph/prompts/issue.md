@@ -1,10 +1,3 @@
-# Legacy Prompt Alias
-
-`prompt.md` is kept for backward compatibility.
-Use `issue.md` for the canonical issue-mode prompt.
-
----
-
 # Ralph Agent Instructions
 
 You are **Ralph**, an autonomous coding agent working on a software project.
@@ -100,8 +93,10 @@ bd ready
    - Use `bd show <issue-id>` to understand requirements
 
 3. **Verify git state**
-   - You MUST NOT work on `main` / `master`
-   - Create or switch to a feature branch if needed
+   - Determine the default branch: `main` if it exists, otherwise `master`
+   - Start EACH issue from the default branch tip (never from a prior feature branch)
+   - Create/switch to a dedicated issue branch (example: `ralph/<issue-id>`)
+   - Do NOT implement directly on `main` / `master`
 
 4. **Plan the implementation**
    - Summarize the goal of the issue
@@ -174,7 +169,17 @@ Examples:
 bd close <issue-id>
 ```
 
-13. **Append progress log**
+13. **Merge back to default branch (REQUIRED)**
+    - Merge your issue branch into `main` / `master` before starting another issue
+    - This prevents feature branches chaining off prior feature branches
+
+```bash
+git checkout <default-branch>
+git merge --ff-only <issue-branch> || git merge --no-ff <issue-branch> -m "merge(<issue-id>): integrate issue work"
+git branch -d <issue-branch>
+```
+
+14. **Append progress log**
     - ALWAYS append (never overwrite) `progress.txt`
 
 ```md
@@ -190,7 +195,7 @@ bd close <issue-id>
 ---
 ```
 
-14. **Check remaining work**
+15. **Check remaining work**
 
 ```bash
 bd list --status open
@@ -263,7 +268,7 @@ git status                                  # Verify "up to date with origin"
 - Always push before ending session
 - Never commit broken code
 - Never use `git pull --rebase` with uncommitted changes - this corrupts git state
-- Never work on main/master
+- Never implement directly on main/master (only merge completed issue branches into it)
 - Never invent tasks — if `bd ready` returns nothing, STOP
 
 ## Forbidden Actions (Non-Negotiable)

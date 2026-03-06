@@ -14,6 +14,9 @@ archive/
 .ralph/archive/
 .ralph/.last-run
 .ralph/logs/
+.ralph/state.json
+.ralph/issue-snapshot.json
+.ralph/run.lock
 
 # Logs and temp files
 *.log
