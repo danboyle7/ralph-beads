@@ -224,33 +224,12 @@ pub(crate) fn ensure_issue_snapshot_consistency(paths: &Paths) -> Result<()> {
 }
 
 pub(crate) fn get_next_issue() -> Result<Option<String>> {
-    for args in [
-        vec!["bd", "ready", "--json"],
-        vec![
-            "bd",
-            "list",
-            "--status",
-            "open",
-            "--flat",
-            "--json",
-            "--no-pager",
-        ],
-    ] {
-        let output = run_bd_query(args.clone(), "next issue query")?;
-        let value: Value =
-            serde_json::from_str(&output).with_context(|| format!("failed to parse {:?}", args))?;
-        if let Some(items) = value.as_array() {
-            if let Some(issue_id) = items
-                .first()
-                .and_then(|item| item.get("id"))
-                .and_then(|id| id.as_str())
-            {
-                return Ok(Some(issue_id.to_string()));
-            }
-        }
-    }
+    let args = ["bd", "ready", "--json"];
+    let output = run_bd_query(args, "next issue query")?;
+    let value: Value =
+        serde_json::from_str(&output).with_context(|| format!("failed to parse {:?}", args))?;
 
-    Ok(None)
+    Ok(value.as_array().and_then(|items| next_ready_issue_id(items)))
 }
 
 pub(crate) fn get_issue_details(issue_id: &str) -> Result<String> {
@@ -397,6 +376,18 @@ fn issue_type_from_item(item: &Value) -> Option<String> {
         .find_map(json_value_to_label)
 }
 
+fn next_ready_issue_id(items: &[Value]) -> Option<String> {
+    items.iter().find_map(|item| {
+        if issue_type_from_item(item).as_deref() == Some("epic") {
+            return None;
+        }
+
+        item.get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    })
+}
+
 fn json_value_to_label(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_ascii_lowercase());
@@ -405,4 +396,38 @@ fn json_value_to_label(value: &Value) -> Option<String> {
         .get("name")
         .and_then(Value::as_str)
         .map(|text| text.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn next_ready_issue_skips_epics_and_keeps_ready_order() {
+        let items = vec![
+            json!({ "id": "BD-100", "type": "epic" }),
+            json!({ "id": "BD-101", "type": "bug" }),
+            json!({ "id": "BD-102", "type": "task" }),
+        ];
+
+        assert_eq!(next_ready_issue_id(&items), Some("BD-101".to_string()));
+    }
+
+    #[test]
+    fn next_ready_issue_accepts_items_without_type_metadata() {
+        let items = vec![json!({ "id": "BD-200" })];
+
+        assert_eq!(next_ready_issue_id(&items), Some("BD-200".to_string()));
+    }
+
+    #[test]
+    fn next_ready_issue_returns_none_when_only_epics_are_ready() {
+        let items = vec![
+            json!({ "id": "BD-300", "issue_type": "epic" }),
+            json!({ "id": "BD-301", "kind": { "name": "epic" } }),
+        ];
+
+        assert_eq!(next_ready_issue_id(&items), None);
+    }
 }

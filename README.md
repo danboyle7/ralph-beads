@@ -4,7 +4,7 @@
 
 ## How it works
 
-1. Fetches the next ready issue via `bd ready`
+1. Fetches the next ready non-epic issue via `bd ready`
 2. Builds a prompt from:
    - `.ralph/prompts/ralph.md` (shared rules)
    - `.ralph/prompts/issue.md` (issue mode)
@@ -125,6 +125,9 @@ Interactive TUI note:
 - When Ralph reaches the current iteration budget without finishing, the TUI can extend the same run in place.
 - Press `n` for one more iteration, or `x` to open a numeric prompt (prefilled with `5`) and add that many more iterations.
 - These controls only appear after the current budget is exhausted; plain mode still stops at the configured budget.
+
+Issue selection note:
+- Ralph preserves `bd ready` ordering but skips items typed as `epic`; each loop iteration executes a single ready child issue/work item.
 
 ## Cleanup + reflection
 
