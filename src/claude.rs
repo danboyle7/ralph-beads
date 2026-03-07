@@ -47,7 +47,7 @@ pub(super) fn run_claude(
     FULL_ACTIVITY_TEXT.store(cli.verbose, Ordering::Relaxed);
 
     if cli.dry_run {
-        send_activity(ui_tx, debug_logs, format!("Dry run for issue {issue_id}"));
+        send_tool_log(ui_tx, debug_logs, format!("Dry run for issue {issue_id}"));
         for line in prompt.lines() {
             send(ui_tx, UiEvent::Output(line.to_string()));
         }
@@ -66,7 +66,7 @@ pub(super) fn run_claude(
                     return Err(error);
                 }
                 attempt += 1;
-                send_activity(
+                send_tool_log(
                     ui_tx,
                     debug_logs,
                     format!(
@@ -88,8 +88,8 @@ fn run_claude_once(
     debug_logs: &mut Option<DebugLogs>,
 ) -> Result<ClaudeOutcome> {
     FULL_ACTIVITY_TEXT.store(cli.verbose, Ordering::Relaxed);
-    send_activity(ui_tx, debug_logs, format!("Running Claude on {issue_id}"));
-    send_activity(ui_tx, debug_logs, "Using structured Claude stream");
+    send_tool_log(ui_tx, debug_logs, format!("Running Claude on {issue_id}"));
+    send_tool_log(ui_tx, debug_logs, "Using structured Claude stream");
 
     let current_dir = std::env::current_dir().context("failed to determine cwd")?;
     let mut child = Command::new("claude")
@@ -1242,9 +1242,11 @@ fn semantic_activity_events(
         let phase = phase_for_tool(&name, input_value);
         if let Some(phase) = phase {
             if let Some(changed) = render_state.phase_tracker.transition_to(phase) {
-                bundle
-                    .activities
-                    .push(format!("{actor}: phase_change | to={}", changed.as_str()));
+                bundle.activities.push(format!(
+                    "{} | to={}",
+                    activity_head(&actor, "phase_change"),
+                    changed.as_str()
+                ));
                 bundle
                     .timeline_lines
                     .push(format!("phase_started | {}", changed.as_str()));
@@ -1260,7 +1262,8 @@ fn semantic_activity_events(
             if phase == RunPhase::Implement {
                 if let Some(cause) = render_state.phase_tracker.take_validation_error() {
                     bundle.activities.push(format!(
-                        "{actor}: fix_cycle_started | cause={}",
+                        "{} | cause={}",
+                        activity_head(&actor, "fix_cycle_started"),
                         compact_text(&cause, 120)
                     ));
                     bundle
@@ -1295,7 +1298,8 @@ fn semantic_activity_events(
             let attempt = render_state.phase_tracker.next_validation_attempt(key);
             validation_attempt = Some(attempt);
             bundle.activities.push(format!(
-                "{actor}: validation_attempt | check={key} | attempt={attempt}"
+                "{} | check={key} | attempt={attempt}",
+                activity_head(&actor, "validation_attempt")
             ));
             bundle
                 .timeline_lines
@@ -1313,7 +1317,7 @@ fn semantic_activity_events(
         }
 
         let mut parts = vec![
-            format!("{actor}: tool_done"),
+            activity_head(&actor, "tool_done"),
             format!("id={}", compact_text(tool_use_id, 16)),
             format!("name={name}"),
             format!("status={status}"),
@@ -1427,7 +1431,7 @@ fn semantic_activity_events(
             }
             if let Some(key) = validation_key.as_deref() {
                 let mut result_parts = vec![
-                    format!("{actor}: validation_result"),
+                    activity_head(&actor, "validation_result"),
                     format!("check={key}"),
                     format!("status={status}"),
                 ];
@@ -2018,7 +2022,10 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
                     .and_then(|value| value.get("message"))
                     .and_then(|message| message.get("usage")),
             );
-            let mut parts = vec![format!("{actor}: message_start"), format!("model={model}")];
+            let mut parts = vec![
+                activity_head(&actor, "message_start"),
+                format!("model={model}"),
+            ];
             if let Some(summary) = usage {
                 parts.push(format!("usage({summary})"));
             }
@@ -2033,7 +2040,7 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
             if stop_reason.is_none() && usage.is_none() {
                 return None;
             }
-            let mut parts = vec![format!("{actor}: message_delta")];
+            let mut parts = vec![activity_head(&actor, "message_delta")];
             if let Some(reason) = stop_reason {
                 parts.push(format!("stop_reason={reason}"));
             }
@@ -2042,7 +2049,7 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
             }
             Some(parts.join(" | "))
         }
-        Some("message_stop") => Some(format!("{actor}: message_stop")),
+        Some("message_stop") => Some(activity_head(&actor, "message_stop")),
         Some("content_block_start") => {
             let block = event.and_then(|value| value.get("content_block"));
             let block_type = block
@@ -2066,7 +2073,7 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
                     .map(|value| compact_text(value, 16))
                     .unwrap_or_else(|| "unknown".to_string());
                 let mut parts = vec![
-                    format!("{actor}: tool_start"),
+                    activity_head(&actor, "tool_start"),
                     format!("index={index}"),
                     format!("name={tool_name}"),
                     format!("id={tool_use_id}"),
@@ -2081,11 +2088,13 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
             }
 
             Some(format!(
-                "{actor}: block_start | index={index} | type={block_type}"
+                "{} | index={index} | type={block_type}",
+                activity_head(&actor, "block_start")
             ))
         }
         Some("content_block_stop") => Some(format!(
-            "{actor}: block_stop | index={}",
+            "{} | index={}",
+            activity_head(&actor, "block_stop"),
             event
                 .and_then(|value| value.get("index"))
                 .and_then(Value::as_u64)
@@ -2102,7 +2111,10 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
                         .and_then(|tool| tool.get("input"))
                 }),
             );
-            let mut parts = vec![format!("{actor}: tool_call"), format!("name={tool_name}")];
+            let mut parts = vec![
+                activity_head(&actor, "tool_call"),
+                format!("name={tool_name}"),
+            ];
             if let Some(summary) = input {
                 parts.push(summary);
             }
@@ -2120,7 +2132,7 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
                 .unwrap_or(false);
             let status = if is_error { "error" } else { "ok" };
             let mut parts = vec![
-                format!("{actor}: tool_result"),
+                activity_head(&actor, "tool_result"),
                 format!("id={tool_use_id}"),
                 format!("status={status}"),
             ];
@@ -2134,7 +2146,8 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
             Some(parts.join(" | "))
         }
         Some("error") => Some(format!(
-            "{actor}: error | {}",
+            "{} | {}",
+            activity_head(&actor, "error"),
             event
                 .and_then(|value| value.get("error"))
                 .and_then(Value::as_str)
@@ -2163,7 +2176,7 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
                     .or_else(|| root.get("content")),
             )
             .map(|text| compact_text(&text, 110));
-            let mut parts = vec![format!("{actor}: assistant"), format!("model={model}")];
+            let mut parts = vec![activity_head(&actor, "assistant"), format!("model={model}")];
             if let Some(summary) = usage {
                 parts.push(format!("usage({summary})"));
             }
@@ -2180,7 +2193,10 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
             let turns = root.get("num_turns").and_then(Value::as_u64);
             let duration_ms = root.get("duration_ms").and_then(Value::as_u64);
             let total_cost = root.get("total_cost_usd").and_then(Value::as_f64);
-            let mut parts = vec![format!("{actor}: result"), format!("subtype={subtype}")];
+            let mut parts = vec![
+                activity_head(&actor, "result"),
+                format!("subtype={subtype}"),
+            ];
             if let Some(turns) = turns {
                 parts.push(format!("turns={turns}"));
             }
@@ -2213,10 +2229,31 @@ fn activity_for_event(root: &Value, event: Option<&Value>) -> Option<String> {
                 .map(|value| value.format("%Y-%m-%d %H:%M:%S %Z").to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             Some(format!(
-                "{actor}: rate_limit_event | status={status} | type={limit_type} | reason={reason} | blocking={} | reset_at={reset_at}",
+                "{} | status={status} | type={limit_type} | reason={reason} | blocking={} | reset_at={reset_at}",
+                activity_head(&actor, "rate_limit_event"),
                 rate_limit.is_blocking()
             ))
         }
         _ => None,
     }
+}
+
+fn activity_head(actor: &str, event: &str) -> String {
+    if actor == "claude" {
+        event.to_string()
+    } else {
+        format!("{actor}: {event}")
+    }
+}
+
+fn send_tool_log(
+    ui_tx: &Sender<UiEvent>,
+    debug_logs: &mut Option<DebugLogs>,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if let Some(logs) = debug_logs.as_mut() {
+        logs.log_semantic_line("tool_note", &message);
+    }
+    send(ui_tx, UiEvent::Progress(message));
 }
