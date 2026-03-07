@@ -30,16 +30,6 @@ cargo run --bin ralph -- --dry-run
 cargo run --bin ralph -- --dry-run --verbose
 ```
 
-## Behavior / Invariant Checks
-
-- [ ] Issue selection still comes from `bd ready`
-- [ ] Completion signal remains `<promise>COMPLETE</promise>`
-- [ ] Progress log behavior remains append-only
-- [ ] Previous run artifacts are archived before a new run starts
-- [ ] Claude execution remains non-interactive (stdin-driven)
-- [ ] Autonomous execution keeps `--dangerously-skip-permissions`
-- [ ] Exit code semantics remain stable (`0`, `100`, errors)
-
 ## Breaking Changes
 
 - [ ] None

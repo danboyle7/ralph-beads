@@ -6,6 +6,57 @@ struct IterationPauseSummary {
     failed_issues: usize,
 }
 
+struct RunStatsSummary<'a> {
+    run_id: &'a str,
+    open_count: usize,
+    completed_issues: usize,
+    failed_issues: usize,
+    iteration: usize,
+    total_iterations: usize,
+}
+
+struct PauseContext<'a> {
+    cli: &'a Cli,
+    paths: &'a Paths,
+    run_id: &'a str,
+    ui_tx: &'a Sender<UiEvent>,
+    control_rx: &'a Receiver<WorkerControl>,
+    debug_logs: &'a mut Option<DebugLogs>,
+}
+
+struct PostRunActionState<'a> {
+    stop_line: &'a str,
+    pending_status: &'a str,
+    summary: RunStatsSummary<'a>,
+}
+
+fn tool_log_line(message: impl Into<String>) -> String {
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+    format!("[{timestamp}] {}", message.into())
+}
+
+fn send_tool_log(ui_tx: &Sender<UiEvent>, message: impl Into<String>) {
+    send(ui_tx, UiEvent::Progress(tool_log_line(message)));
+}
+
+fn record_tool_note(
+    paths: &Paths,
+    ui_tx: &Sender<UiEvent>,
+    debug_logs: &mut Option<DebugLogs>,
+    message: impl Into<String>,
+) -> Result<()> {
+    let message = message.into();
+    if let Some(logs) = debug_logs.as_mut() {
+        logs.log_activity(&message);
+    }
+    if paths.progress_file.exists() {
+        log_progress(paths, ui_tx, message)
+    } else {
+        send_tool_log(ui_tx, message);
+        Ok(())
+    }
+}
+
 pub(super) fn run_main_loop(cli: Cli, paths: Paths, settings: RuntimeSettings) -> Result<()> {
     let use_tui = !cli.plain && io::stdout().is_terminal();
     let (ui_tx, ui_rx) = mpsc::channel();
@@ -37,6 +88,7 @@ pub(super) fn run_main_loop(cli: Cli, paths: Paths, settings: RuntimeSettings) -
             ui_rx,
             control_tx.expect("TUI control channel missing"),
             graceful_quit,
+            paths.project_dir.clone(),
         )
     } else {
         run_plain_ui(ui_rx)
@@ -63,7 +115,7 @@ pub(super) fn worker_main(
 
     let announce_startup_step = |message: &str| {
         send(&ui_tx, UiEvent::Status(message.to_string()));
-        send(&ui_tx, UiEvent::Activity(message.to_string()));
+        send_tool_log(&ui_tx, message.to_string());
     };
 
     announce_startup_step(&format!("Startup: {}", build_info::display()));
@@ -153,7 +205,7 @@ pub(super) fn worker_main(
             logs.report_path.display(),
         );
         logs.log_activity(&notice);
-        send(&ui_tx, UiEvent::Activity(notice));
+        send_tool_log(&ui_tx, notice);
     }
 
     log_progress(
@@ -257,11 +309,12 @@ pub(super) fn worker_main(
             &ui_tx,
             UiEvent::Status(format!("Recovery: interrupted issue {issue_id}")),
         );
-        send_activity(
+        record_tool_note(
+            &paths,
             &ui_tx,
             &mut debug_logs,
             format!("Recovery mode: detected interrupted issue {issue_id}; running cleanup pass"),
-        );
+        )?;
         log_progress(
             &paths,
             &ui_tx,
@@ -312,12 +365,16 @@ pub(super) fn worker_main(
     loop {
         if iteration > total_iterations {
             if let Some(control_rx) = control_rx.as_ref() {
-                match wait_for_iteration_extension(
-                    &paths,
-                    &run_id,
-                    &ui_tx,
+                let mut pause_ctx = PauseContext {
+                    cli: &cli,
+                    paths: &paths,
+                    run_id: &run_id,
+                    ui_tx: &ui_tx,
                     control_rx,
-                    &mut debug_logs,
+                    debug_logs: &mut debug_logs,
+                };
+                match wait_for_iteration_extension(
+                    &mut pause_ctx,
                     total_iterations,
                     IterationPauseSummary {
                         open_count,
@@ -386,6 +443,9 @@ pub(super) fn worker_main(
             None => {
                 let remaining = get_remaining_issue_count().unwrap_or(0);
                 if remaining > 0 {
+                    let stop_line = format!(
+                        "No ready/open issues. {remaining} non-closed issues remain (likely blocked/in_progress)."
+                    );
                     log_progress(
                         &paths,
                         &ui_tx,
@@ -393,15 +453,37 @@ pub(super) fn worker_main(
                             "STOPPED: No ready/open issues, but {remaining} non-closed issues remain"
                         ),
                     )?;
-                    send(
-                        &ui_tx,
-                        UiEvent::Stop(format!(
-                            "No ready/open issues. {remaining} non-closed issues remain (likely blocked/in_progress)."
-                        )),
-                    );
+                    if let Some(control_rx) = control_rx.as_ref() {
+                        let mut pause_ctx = PauseContext {
+                            cli: &cli,
+                            paths: &paths,
+                            run_id: &run_id,
+                            ui_tx: &ui_tx,
+                            control_rx,
+                            debug_logs: &mut debug_logs,
+                        };
+                        wait_for_post_run_action(
+                            &mut pause_ctx,
+                            PostRunActionState {
+                                stop_line: &stop_line,
+                                pending_status: "stopped",
+                                summary: RunStatsSummary {
+                                    run_id: run_id.as_str(),
+                                    open_count,
+                                    completed_issues,
+                                    failed_issues,
+                                    iteration,
+                                    total_iterations,
+                                },
+                            },
+                        )?;
+                    } else {
+                        send(&ui_tx, UiEvent::Stop(stop_line));
+                    }
                     mark_run_state_finished(&paths, &run_id, "stopped")?;
                     return Ok(());
                 }
+                let stop_line = "No more issues to process".to_string();
                 log_progress(
                     &paths,
                     &ui_tx,
@@ -418,10 +500,33 @@ pub(super) fn worker_main(
                         total_iterations,
                     )),
                 );
-                send(
-                    &ui_tx,
-                    UiEvent::Stop("No more issues to process".to_string()),
-                );
+                if let Some(control_rx) = control_rx.as_ref() {
+                    let mut pause_ctx = PauseContext {
+                        cli: &cli,
+                        paths: &paths,
+                        run_id: &run_id,
+                        ui_tx: &ui_tx,
+                        control_rx,
+                        debug_logs: &mut debug_logs,
+                    };
+                    wait_for_post_run_action(
+                        &mut pause_ctx,
+                        PostRunActionState {
+                            stop_line: &stop_line,
+                            pending_status: "completed",
+                            summary: RunStatsSummary {
+                                run_id: run_id.as_str(),
+                                open_count: 0,
+                                completed_issues,
+                                failed_issues,
+                                iteration,
+                                total_iterations,
+                            },
+                        },
+                    )?;
+                } else {
+                    send(&ui_tx, UiEvent::Stop(stop_line));
+                }
                 mark_run_state_finished(&paths, &run_id, "completed")?;
                 return Ok(());
             }
@@ -448,28 +553,35 @@ pub(super) fn worker_main(
         let issue_details = get_issue_details(&issue_id)?;
         send(&ui_tx, UiEvent::IssueDetails(issue_details.clone()));
         if cli.verbose {
-            send_activity(&ui_tx, &mut debug_logs, format!("Loaded issue {issue_id}"));
+            record_tool_note(
+                &paths,
+                &ui_tx,
+                &mut debug_logs,
+                format!("Loaded issue {issue_id}"),
+            )?;
         }
 
         let prompt = build_prompt(&paths, &issue_id, &issue_details);
         let issue_status_before = if cli.dry_run {
-            send_activity(
+            record_tool_note(
+                &paths,
                 &ui_tx,
                 &mut debug_logs,
                 "Dry run: skipping close guardrail verification for this iteration".to_string(),
-            );
+            )?;
             None
         } else {
             match get_issue_status_map() {
                 Ok(map) => Some(map),
                 Err(error) => {
-                    send_activity(
+                    record_tool_note(
+                        &paths,
                         &ui_tx,
                         &mut debug_logs,
                         format!(
                             "WARN: Unable to capture issue status baseline for close guardrail: {error}"
                         ),
-                    );
+                    )?;
                     None
                 }
             }
@@ -539,7 +651,7 @@ pub(super) fn worker_main(
                 if remaining == 0 {
                     completed_issues += 1;
                     let closed_epics = if settings.reflect_every_epic {
-                        newly_closed_epic_ids(&issue_status_before, &ui_tx, &mut debug_logs)
+                        newly_closed_epic_ids(&paths, &issue_status_before, &ui_tx, &mut debug_logs)
                     } else {
                         Vec::new()
                     };
@@ -594,10 +706,36 @@ pub(super) fn worker_main(
                         &ui_tx,
                         "COMPLETE: All issues done (signaled by Claude)".to_string(),
                     )?;
-                    send(
-                        &ui_tx,
-                        UiEvent::Stop("Claude signaled completion".to_string()),
-                    );
+                    if let Some(control_rx) = control_rx.as_ref() {
+                        let mut pause_ctx = PauseContext {
+                            cli: &cli,
+                            paths: &paths,
+                            run_id: &run_id,
+                            ui_tx: &ui_tx,
+                            control_rx,
+                            debug_logs: &mut debug_logs,
+                        };
+                        wait_for_post_run_action(
+                            &mut pause_ctx,
+                            PostRunActionState {
+                                stop_line: "Claude signaled completion",
+                                pending_status: "completed",
+                                summary: RunStatsSummary {
+                                    run_id: run_id.as_str(),
+                                    open_count,
+                                    completed_issues,
+                                    failed_issues,
+                                    iteration,
+                                    total_iterations,
+                                },
+                            },
+                        )?;
+                    } else {
+                        send(
+                            &ui_tx,
+                            UiEvent::Stop("Claude signaled completion".to_string()),
+                        );
+                    }
                     mark_run_state_finished(&paths, &run_id, "completed")?;
                     return Ok(());
                 }
@@ -605,11 +743,12 @@ pub(super) fn worker_main(
                 completed_issues += 1;
                 match get_open_issue_count() {
                     Ok(count) => open_count = count,
-                    Err(error) => send_activity(
+                    Err(error) => record_tool_note(
+                        &paths,
                         &ui_tx,
                         &mut debug_logs,
                         format!("Unable to refresh open issue count: {error}"),
-                    ),
+                    )?,
                 }
                 send(
                     &ui_tx,
@@ -622,13 +761,14 @@ pub(super) fn worker_main(
                         total_iterations,
                     )),
                 );
-                send_activity(
+                record_tool_note(
+                    &paths,
                     &ui_tx,
                     &mut debug_logs,
                     format!(
                         "Ignoring premature COMPLETE signal: {remaining} non-closed issues remain"
                     ),
-                );
+                )?;
                 log_progress(
                     &paths,
                     &ui_tx,
@@ -656,11 +796,12 @@ pub(super) fn worker_main(
                 completed_issues += 1;
                 match get_open_issue_count() {
                     Ok(count) => open_count = count,
-                    Err(error) => send_activity(
+                    Err(error) => record_tool_note(
+                        &paths,
                         &ui_tx,
                         &mut debug_logs,
                         format!("Unable to refresh open issue count: {error}"),
-                    ),
+                    )?,
                 }
                 send(
                     &ui_tx,
@@ -682,7 +823,7 @@ pub(super) fn worker_main(
         }
 
         let closed_epics = if settings.reflect_every_epic {
-            newly_closed_epic_ids(&issue_status_before, &ui_tx, &mut debug_logs)
+            newly_closed_epic_ids(&paths, &issue_status_before, &ui_tx, &mut debug_logs)
         } else {
             Vec::new()
         };
@@ -751,95 +892,210 @@ pub(super) fn worker_main(
 }
 
 fn wait_for_iteration_extension(
-    paths: &Paths,
-    run_id: &str,
-    ui_tx: &Sender<UiEvent>,
-    control_rx: &Receiver<WorkerControl>,
-    debug_logs: &mut Option<DebugLogs>,
+    ctx: &mut PauseContext<'_>,
     total_iterations: usize,
     summary: IterationPauseSummary,
 ) -> Result<Option<usize>> {
     update_run_state_progress(
-        paths,
-        run_id,
+        ctx.paths,
+        ctx.run_id,
         None,
         total_iterations,
         total_iterations,
         "waiting_for_input",
     )?;
     log_progress(
-        paths,
-        ui_tx,
+        ctx.paths,
+        ctx.ui_tx,
         format!("Paused after reaching max iterations ({total_iterations}); waiting for TUI input"),
     )?;
-    send(ui_tx, UiEvent::IterationBudgetReached(total_iterations));
+    send(ctx.ui_tx, UiEvent::IterationBudgetReached(total_iterations));
 
-    match control_rx.recv() {
-        Ok(WorkerControl::ExtendIterations(additional_iterations)) => {
-            let new_total_iterations = total_iterations + additional_iterations;
-            update_run_state_progress(
-                paths,
-                run_id,
-                None,
-                total_iterations,
-                new_total_iterations,
-                "running",
-            )?;
-            log_progress(
-                paths,
-                ui_tx,
-                format!("Max Iterations: {new_total_iterations}"),
-            )?;
-            log_progress(
-                paths,
-                ui_tx,
-                format!(
-                    "Resuming run with {additional_iterations} additional iteration{} (new budget: {new_total_iterations})",
-                    if additional_iterations == 1 { "" } else { "s" }
-                ),
-            )?;
-            send_activity(
-                ui_tx,
-                debug_logs,
-                format!(
-                    "Iteration budget extended by {additional_iterations}; next iteration will be {}/{}",
-                    total_iterations + 1,
-                    new_total_iterations
-                ),
-            );
-            send(
-                ui_tx,
-                UiEvent::Summary(format_run_stats(
-                    run_id,
-                    summary.open_count,
-                    summary.completed_issues,
-                    summary.failed_issues,
+    loop {
+        match ctx.control_rx.recv() {
+            Ok(WorkerControl::ExtendIterations(additional_iterations)) => {
+                let new_total_iterations = total_iterations + additional_iterations;
+                update_run_state_progress(
+                    ctx.paths,
+                    ctx.run_id,
+                    None,
                     total_iterations,
                     new_total_iterations,
-                )),
-            );
-            send(
-                ui_tx,
-                UiEvent::Status(format!(
-                    "Resuming with {additional_iterations} more iteration{}",
-                    if additional_iterations == 1 { "" } else { "s" }
-                )),
-            );
-            Ok(Some(additional_iterations))
+                    "running",
+                )?;
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!("Max Iterations: {new_total_iterations}"),
+                )?;
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!(
+                        "Resuming run with {additional_iterations} additional iteration{} (new budget: {new_total_iterations})",
+                        if additional_iterations == 1 { "" } else { "s" }
+                    ),
+                )?;
+                record_tool_note(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    ctx.debug_logs,
+                    format!(
+                        "Iteration budget extended by {additional_iterations}; next iteration will be {}/{}",
+                        total_iterations + 1,
+                        new_total_iterations
+                    ),
+                )?;
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Summary(format_run_stats(
+                        ctx.run_id,
+                        summary.open_count,
+                        summary.completed_issues,
+                        summary.failed_issues,
+                        total_iterations,
+                        new_total_iterations,
+                    )),
+                );
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Status(format!(
+                        "Resuming with {additional_iterations} more iteration{}",
+                        if additional_iterations == 1 { "" } else { "s" }
+                    )),
+                );
+                return Ok(Some(additional_iterations));
+            }
+            Ok(WorkerControl::Reflect) => {
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Status("Running reflection suite".to_string()),
+                );
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!(
+                        "Paused after reaching max iterations ({total_iterations}); running reflection suite from TUI"
+                    ),
+                )?;
+                run_reflection_suite(
+                    ctx.cli,
+                    ctx.paths,
+                    ctx.ui_tx,
+                    ctx.debug_logs,
+                    &format!(
+                        "manual TUI reflection while paused at iteration budget {total_iterations}"
+                    ),
+                )?;
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Summary(format_run_stats(
+                        ctx.run_id,
+                        summary.open_count,
+                        summary.completed_issues,
+                        summary.failed_issues,
+                        total_iterations,
+                        total_iterations,
+                    )),
+                );
+                update_run_state_progress(
+                    ctx.paths,
+                    ctx.run_id,
+                    None,
+                    total_iterations,
+                    total_iterations,
+                    "waiting_for_input",
+                )?;
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Status("Waiting for iteration input".to_string()),
+                );
+                send(ctx.ui_tx, UiEvent::IterationBudgetReached(total_iterations));
+            }
+            Ok(WorkerControl::Exit) | Err(_) => {
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!("STOPPED: Reached max iterations ({total_iterations})"),
+                )?;
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Stop(format!(
+                        "Reached max iterations ({total_iterations}) without completion"
+                    )),
+                );
+                return Ok(None);
+            }
         }
-        Ok(WorkerControl::Exit) | Err(_) => {
-            log_progress(
-                paths,
-                ui_tx,
-                format!("STOPPED: Reached max iterations ({total_iterations})"),
-            )?;
-            send(
-                ui_tx,
-                UiEvent::Stop(format!(
-                    "Reached max iterations ({total_iterations}) without completion"
-                )),
-            );
-            Ok(None)
+    }
+}
+
+fn wait_for_post_run_action(
+    ctx: &mut PauseContext<'_>,
+    state: PostRunActionState<'_>,
+) -> Result<()> {
+    update_run_state_progress(
+        ctx.paths,
+        ctx.run_id,
+        None,
+        state.summary.iteration,
+        state.summary.total_iterations,
+        "waiting_for_input",
+    )?;
+    send(ctx.ui_tx, UiEvent::Stop(state.stop_line.to_string()));
+    send(ctx.ui_tx, UiEvent::PostRunReflectAvailable);
+
+    loop {
+        match ctx.control_rx.recv() {
+            Ok(WorkerControl::Reflect) => {
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Status("Running reflection suite".to_string()),
+                );
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!(
+                        "Post-run state: running reflection suite from TUI ({})",
+                        state.pending_status
+                    ),
+                )?;
+                run_reflection_suite(
+                    ctx.cli,
+                    ctx.paths,
+                    ctx.ui_tx,
+                    ctx.debug_logs,
+                    &format!(
+                        "manual TUI reflection after run ended ({})",
+                        state.pending_status
+                    ),
+                )?;
+                let refreshed_open_count =
+                    get_open_issue_count().unwrap_or(state.summary.open_count);
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Summary(format_run_stats(
+                        state.summary.run_id,
+                        refreshed_open_count,
+                        state.summary.completed_issues,
+                        state.summary.failed_issues,
+                        state.summary.iteration,
+                        state.summary.total_iterations,
+                    )),
+                );
+                update_run_state_progress(
+                    ctx.paths,
+                    ctx.run_id,
+                    None,
+                    state.summary.iteration,
+                    state.summary.total_iterations,
+                    "waiting_for_input",
+                )?;
+                send(ctx.ui_tx, UiEvent::Stop(state.stop_line.to_string()));
+                send(ctx.ui_tx, UiEvent::PostRunReflectAvailable);
+            }
+            Ok(WorkerControl::Exit) | Err(_) => return Ok(()),
+            Ok(WorkerControl::ExtendIterations(_)) => {}
         }
     }
 }
@@ -920,12 +1176,9 @@ pub(super) fn archive_previous_run(paths: &Paths, ui_tx: &Sender<UiEvent>) -> Re
         let _ = fs::write(archive_folder.join("beads-snapshot.txt"), snapshot);
     }
 
-    send(
+    send_tool_log(
         ui_tx,
-        UiEvent::Activity(format!(
-            "Archived previous run to {}",
-            archive_folder.display()
-        )),
+        format!("Archived previous run to {}", archive_folder.display()),
     );
     Ok(())
 }
@@ -970,6 +1223,7 @@ pub(super) fn newly_closed_issue_ids(
 }
 
 pub(super) fn newly_closed_epic_ids(
+    paths: &Paths,
     before_statuses: &Option<HashMap<String, String>>,
     ui_tx: &Sender<UiEvent>,
     debug_logs: &mut Option<DebugLogs>,
@@ -981,11 +1235,13 @@ pub(super) fn newly_closed_epic_ids(
     let after = match get_issue_status_map() {
         Ok(map) => map,
         Err(error) => {
-            send_activity(
+            record_tool_note(
+                paths,
                 ui_tx,
                 debug_logs,
                 format!("WARN: Unable to detect newly closed epics: {error}"),
-            );
+            )
+            .ok();
             return Vec::new();
         }
     };
@@ -997,11 +1253,13 @@ pub(super) fn newly_closed_epic_ids(
     let issue_types = match get_issue_type_map() {
         Ok(map) => map,
         Err(error) => {
-            send_activity(
+            record_tool_note(
+                paths,
                 ui_tx,
                 debug_logs,
                 format!("WARN: Unable to load issue types for epic reflection: {error}"),
-            );
+            )
+            .ok();
             return Vec::new();
         }
     };
@@ -1015,11 +1273,13 @@ pub(super) fn newly_closed_epic_ids(
                 .or_else(|| match get_issue_type(id) {
                     Ok(value) => value,
                     Err(error) => {
-                        send_activity(
+                        record_tool_note(
+                            paths,
                             ui_tx,
                             debug_logs,
                             format!("WARN: Unable to look up type for `{id}`: {error}"),
-                        );
+                        )
+                        .ok();
                         None
                     }
                 });
@@ -1042,11 +1302,12 @@ pub(super) fn enforce_single_issue_close_guardrail(
     debug_logs: &mut Option<DebugLogs>,
 ) -> Result<bool> {
     if issue_id.starts_with("REFLECT-") || issue_id.starts_with("CLEANUP") {
-        send_activity(
+        record_tool_note(
+            paths,
             ui_tx,
             debug_logs,
             format!("Close guardrail skipped for non-issue run id `{issue_id}`"),
-        );
+        )?;
         return Ok(true);
     }
 
@@ -1054,8 +1315,7 @@ pub(super) fn enforce_single_issue_close_guardrail(
         Ok(map) => map,
         Err(error) => {
             let message = format!("WARN: Unable to verify close guardrail: {error}");
-            send_activity(ui_tx, debug_logs, message.clone());
-            log_progress(paths, ui_tx, message)?;
+            record_tool_note(paths, ui_tx, debug_logs, message.clone())?;
             return Ok(true);
         }
     };
@@ -1090,14 +1350,12 @@ pub(super) fn enforce_single_issue_close_guardrail(
     match mode {
         CloseGuardrailMode::Warn => {
             let warn = format!("WARN: {message}");
-            send_activity(ui_tx, debug_logs, warn.clone());
-            log_progress(paths, ui_tx, warn)?;
+            record_tool_note(paths, ui_tx, debug_logs, warn.clone())?;
             Ok(true)
         }
         CloseGuardrailMode::Strict => {
             let stop = format!("STOPPED: {message}");
-            send_activity(ui_tx, debug_logs, stop.clone());
-            log_progress(paths, ui_tx, stop.clone())?;
+            record_tool_note(paths, ui_tx, debug_logs, stop.clone())?;
             send(
                 ui_tx,
                 UiEvent::Stop(format!(
@@ -1150,11 +1408,12 @@ pub(super) fn run_reflection_suite(
     debug_logs: &mut Option<DebugLogs>,
     trigger: &str,
 ) -> Result<()> {
-    send_activity(
+    record_tool_note(
+        paths,
         ui_tx,
         debug_logs,
         format!("Starting reflection suite ({trigger})"),
-    );
+    )?;
     run_reflection_pass(
         cli,
         paths,
@@ -1194,11 +1453,12 @@ pub(super) fn run_reflection_suite(
         },
         trigger,
     )?;
-    send_activity(
+    record_tool_note(
+        paths,
         ui_tx,
         debug_logs,
         format!("Reflection suite completed ({trigger})"),
-    );
+    )?;
     Ok(())
 }
 

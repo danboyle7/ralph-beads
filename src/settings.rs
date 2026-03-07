@@ -15,6 +15,7 @@ const DEFAULT_CAPTURE_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_CAPTURE_RETRIES: usize = 1;
 const DEFAULT_CLAUDE_TIMEOUT_MINUTES: u64 = 30;
 const DEFAULT_CLAUDE_RETRIES: usize = 1;
+const DEFAULT_TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RalphConfig {
@@ -25,6 +26,7 @@ pub(crate) struct RalphConfig {
     pub(crate) capture_retries: Option<usize>,
     pub(crate) claude_timeout_minutes: Option<u64>,
     pub(crate) claude_retries: Option<usize>,
+    pub(crate) terminal_scrollback_lines: Option<usize>,
     pub(crate) close_guardrail_mode: Option<CloseGuardrailMode>,
     pub(crate) snapshot_consistency_enabled: Option<bool>,
 }
@@ -38,6 +40,7 @@ pub(crate) struct RuntimeSettings {
     pub(crate) capture_retries: usize,
     pub(crate) claude_timeout: Duration,
     pub(crate) claude_retries: usize,
+    pub(crate) terminal_scrollback_lines: usize,
     pub(crate) close_guardrail_mode: CloseGuardrailMode,
     pub(crate) snapshot_consistency_enabled: bool,
 }
@@ -57,6 +60,7 @@ pub(crate) fn default_runtime_settings() -> RuntimeSettings {
         capture_retries: DEFAULT_CAPTURE_RETRIES,
         claude_timeout: Duration::from_secs(DEFAULT_CLAUDE_TIMEOUT_MINUTES * 60),
         claude_retries: DEFAULT_CLAUDE_RETRIES,
+        terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
         close_guardrail_mode: CloseGuardrailMode::Warn,
         snapshot_consistency_enabled: false,
     }
@@ -127,6 +131,11 @@ pub(crate) fn load_config(paths: &Paths) -> Result<RalphConfig> {
                     config.claude_retries = Some(parsed);
                 }
             }
+            "terminal_scrollback_lines" => {
+                if let Ok(parsed) = value.parse::<usize>() {
+                    config.terminal_scrollback_lines = Some(parsed);
+                }
+            }
             "close_guardrail_mode" => {
                 config.close_guardrail_mode = parse_close_guardrail_mode(value);
             }
@@ -170,6 +179,9 @@ pub(crate) fn resolve_runtime_settings(cli: &mut Cli, config: &RalphConfig) -> R
                 .saturating_mul(60),
         ),
         claude_retries: config.claude_retries.unwrap_or(DEFAULT_CLAUDE_RETRIES),
+        terminal_scrollback_lines: config
+            .terminal_scrollback_lines
+            .unwrap_or(DEFAULT_TERMINAL_SCROLLBACK_LINES),
         close_guardrail_mode: config
             .close_guardrail_mode
             .unwrap_or(CloseGuardrailMode::Warn),

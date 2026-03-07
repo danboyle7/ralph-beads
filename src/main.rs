@@ -13,8 +13,8 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Utc};
 use clap::Parser;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, MouseEvent,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -38,12 +38,14 @@ mod run_state;
 mod runner;
 mod settings;
 mod summary;
+mod terminal;
 
 use crate::capture::is_transient_error_text;
 use crate::claude::ClaudeOutcome;
 use crate::cli::{Cli, Paths};
 use crate::run_state::{RunState, RunStateGuard};
 use crate::settings::{CloseGuardrailMode, RalphConfig, RuntimeSettings};
+use crate::terminal::{terminal_input_bytes, EmbeddedTerminal};
 
 const DEFAULT_META_PROMPT: &str = include_str!("../prompts/ralph.md");
 const DEFAULT_ISSUE_PROMPT: &str = include_str!("../prompts/issue.md");
@@ -59,11 +61,13 @@ const MAX_ACTIVITY_LINES: usize = 1200;
 const MAX_DIFF_LINES: usize = 2400;
 const MAX_DIFF_LINES_PER_EVENT: usize = 280;
 const MAX_LIVE_CALLS: usize = 300;
+const MAX_UI_EVENTS_PER_TICK: usize = 200;
 const AUTO_SCROLL: u16 = u16::MAX;
 const SCROLL_STEP: usize = 3;
-const DEFAULT_TUI_FOOTER: &str =
-    "Controls: q/Esc quit now, Shift+Q stop after current iteration, mouse wheel scrolls panel";
+const DEFAULT_TUI_MESSAGE: &str =
+    "Interactive TUI ready. Toggle columns with 1-4, click panes to change focus, mouse wheel scrolls panels.";
 const DEFAULT_ADDITIONAL_ITERATIONS: usize = 5;
+const TERMINAL_CLOSE_KEY: &str = "F12";
 const BG_MAIN: Color = Color::Rgb(10, 14, 24);
 const BG_PANEL: Color = Color::Rgb(18, 24, 38);
 const BG_HEADER: Color = Color::Rgb(12, 34, 52);
@@ -144,7 +148,6 @@ impl Drop for CleanupGuard {
     fn drop(&mut self) {}
 }
 
-#[derive(Clone)]
 struct UiApp {
     status: String,
     issue: String,
@@ -160,11 +163,20 @@ struct UiApp {
     subagent_calls: HashMap<String, SubagentUiEntry>,
     subagent_order: VecDeque<String>,
     diff_lines: VecDeque<String>,
-    footer: String,
+    message: String,
     spinner_label: Option<String>,
     spinner_frame: usize,
     usage: UsageTally,
     total_cost_usd: f64,
+    show_output: bool,
+    show_diff: bool,
+    show_side: bool,
+    show_terminal: bool,
+    focus_mode: FocusMode,
+    embedded_terminal: Option<EmbeddedTerminal>,
+    terminal_error: Option<String>,
+    terminal_area: Option<Rect>,
+    terminal_cwd: Option<PathBuf>,
     graceful_quit_requested: bool,
     progress_scroll: u16,
     issue_details_scroll: u16,
@@ -177,7 +189,22 @@ struct UiApp {
     iteration_input_mode: bool,
     iteration_input_value: String,
     iteration_input_error: Option<String>,
+    reflect_available: bool,
     should_quit: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusMode {
+    Ralph,
+    Terminal,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BottomColumn {
+    Output,
+    Diff,
+    Side,
+    Terminal,
 }
 
 impl UiApp {
@@ -197,11 +224,20 @@ impl UiApp {
             subagent_calls: HashMap::new(),
             subagent_order: VecDeque::new(),
             diff_lines: VecDeque::new(),
-            footer: DEFAULT_TUI_FOOTER.to_string(),
+            message: DEFAULT_TUI_MESSAGE.to_string(),
             spinner_label: None,
             spinner_frame: 0,
             usage: UsageTally::default(),
             total_cost_usd: 0.0,
+            show_output: true,
+            show_diff: true,
+            show_side: true,
+            show_terminal: false,
+            focus_mode: FocusMode::Ralph,
+            embedded_terminal: None,
+            terminal_error: None,
+            terminal_area: None,
+            terminal_cwd: None,
             graceful_quit_requested: false,
             progress_scroll: AUTO_SCROLL,
             issue_details_scroll: 0,
@@ -214,6 +250,7 @@ impl UiApp {
             iteration_input_mode: false,
             iteration_input_value: DEFAULT_ADDITIONAL_ITERATIONS.to_string(),
             iteration_input_error: None,
+            reflect_available: false,
             should_quit: false,
         }
     }
@@ -338,12 +375,213 @@ impl UiApp {
                 .any(|entry| entry.status == LiveCallStatus::Running)
     }
 
-    fn set_default_footer(&mut self) {
+    fn set_terminal_context(&mut self, project_dir: &Path) {
+        self.terminal_cwd = Some(project_dir.to_path_buf());
+    }
+
+    fn init_terminal(&mut self, project_dir: &Path, area: Rect) -> Result<()> {
+        let terminal = EmbeddedTerminal::spawn(
+            project_dir,
+            area,
+            runtime_settings().terminal_scrollback_lines,
+        )?;
+        self.embedded_terminal = Some(terminal);
+        self.terminal_error = None;
+        self.terminal_area = Some(area);
+        self.terminal_cwd = Some(project_dir.to_path_buf());
+        Ok(())
+    }
+
+    fn has_terminal(&self) -> bool {
+        self.embedded_terminal.is_some()
+    }
+
+    fn terminal_visible(&self) -> bool {
+        self.show_terminal
+    }
+
+    fn terminal_focused(&self) -> bool {
+        self.terminal_visible()
+            && self.focus_mode == FocusMode::Terminal
+            && self.embedded_terminal.is_some()
+    }
+
+    fn focus_ralph(&mut self) {
+        self.focus_mode = FocusMode::Ralph;
+    }
+
+    fn focus_terminal(&mut self) {
+        if self.show_terminal && self.embedded_terminal.is_some() {
+            self.focus_mode = FocusMode::Terminal;
+        }
+    }
+
+    fn visible_bottom_column_count(&self) -> usize {
+        usize::from(self.show_output)
+            + usize::from(self.show_diff)
+            + usize::from(self.show_side)
+            + usize::from(self.show_terminal)
+    }
+
+    fn column_visible(&self, column: BottomColumn) -> bool {
+        match column {
+            BottomColumn::Output => self.show_output,
+            BottomColumn::Diff => self.show_diff,
+            BottomColumn::Side => self.show_side,
+            BottomColumn::Terminal => self.show_terminal,
+        }
+    }
+
+    fn visible_bottom_columns(&self) -> Vec<BottomColumn> {
+        let mut columns = Vec::with_capacity(4);
+        if self.show_output {
+            columns.push(BottomColumn::Output);
+        }
+        if self.show_diff {
+            columns.push(BottomColumn::Diff);
+        }
+        if self.show_side {
+            columns.push(BottomColumn::Side);
+        }
+        if self.show_terminal {
+            columns.push(BottomColumn::Terminal);
+        }
+        columns
+    }
+
+    fn hide_column(&mut self, column: BottomColumn) -> Result<()> {
+        if !self.column_visible(column) {
+            return Ok(());
+        }
+        match column {
+            BottomColumn::Terminal => self.force_close_terminal(),
+            BottomColumn::Output | BottomColumn::Diff | BottomColumn::Side => {
+                if self.visible_bottom_column_count() <= 1 {
+                    bail!("at least one bottom column must remain visible");
+                }
+                match column {
+                    BottomColumn::Output => self.show_output = false,
+                    BottomColumn::Diff => self.show_diff = false,
+                    BottomColumn::Side => self.show_side = false,
+                    BottomColumn::Terminal => unreachable!(),
+                }
+                self.focus_mode = FocusMode::Ralph;
+            }
+        }
+        Ok(())
+    }
+
+    fn show_column(&mut self, column: BottomColumn) {
+        match column {
+            BottomColumn::Output => self.show_output = true,
+            BottomColumn::Diff => self.show_diff = true,
+            BottomColumn::Side => self.show_side = true,
+            BottomColumn::Terminal => self.show_terminal = true,
+        }
+    }
+
+    fn close_terminal(&mut self) {
+        self.force_close_terminal();
+    }
+
+    fn ensure_terminal(&mut self, area: Rect) -> Result<bool> {
+        if self.embedded_terminal.is_some() {
+            return Ok(false);
+        }
+        let Some(cwd) = self.terminal_cwd.clone() else {
+            bail!("terminal spawn path is unavailable");
+        };
+        self.init_terminal(&cwd, area)?;
+        Ok(true)
+    }
+
+    fn force_close_terminal(&mut self) {
+        self.show_terminal = false;
+        self.embedded_terminal = None;
+        self.terminal_area = None;
+        self.focus_mode = FocusMode::Ralph;
+        if self.visible_bottom_column_count() == 0 {
+            self.show_diff = true;
+        }
+    }
+
+    fn sync_terminal_size(&mut self, area: Rect) -> Result<()> {
+        let Some(terminal) = self.embedded_terminal.as_mut() else {
+            return Ok(());
+        };
+        if self.terminal_area == Some(area) {
+            return Ok(());
+        }
+        terminal.resize(area)?;
+        self.terminal_area = Some(area);
+        Ok(())
+    }
+
+    fn send_terminal_input(&mut self, bytes: &[u8]) -> Result<()> {
+        let Some(terminal) = self.embedded_terminal.as_mut() else {
+            bail!("embedded terminal is unavailable");
+        };
+        terminal.write_input(bytes)
+    }
+
+    fn scroll_terminal(&mut self, mouse_kind: MouseEventKind) {
+        let Some(terminal) = self.embedded_terminal.as_mut() else {
+            return;
+        };
+        match mouse_kind {
+            MouseEventKind::ScrollUp => terminal.scroll_scrollback(-3),
+            MouseEventKind::ScrollDown => terminal.scroll_scrollback(3),
+            _ => {}
+        }
+    }
+
+    fn poll_terminal_exit(&mut self) -> Result<Option<String>> {
+        let Some(terminal) = self.embedded_terminal.as_mut() else {
+            return Ok(None);
+        };
+        let Some(status) = terminal.try_wait()? else {
+            return Ok(None);
+        };
+
+        self.close_terminal();
+        let detail = if let Some(signal) = status.signal() {
+            format!("signal {signal}")
+        } else {
+            format!("exit code {}", status.exit_code())
+        };
+        Ok(Some(format!("Embedded terminal closed ({detail})")))
+    }
+
+    fn message_text(&self) -> String {
+        if self.terminal_focused() {
+            "Terminal focused. Typing goes to the embedded shell.".to_string()
+        } else {
+            self.message.clone()
+        }
+    }
+
+    fn controls_text(&self) -> String {
+        if self.iteration_input_mode {
+            "digits edit count, Enter resume, Esc cancel".to_string()
+        } else if self.awaiting_iteration_extension {
+            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [r] run reflection  [q]/[Esc] exit".to_string()
+        } else if self.reflect_available {
+            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [r] run reflection  [q]/[Esc] exit".to_string()
+        } else if self.terminal_focused() {
+            format!(
+                "Typing goes to terminal  [{TERMINAL_CLOSE_KEY}] close terminal  click another pane to return focus"
+            )
+        } else {
+            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [q]/[Esc] quit now  [Shift+Q] stop after current iteration".to_string()
+        }
+    }
+
+    fn set_default_message(&mut self) {
         if self.graceful_quit_requested {
-            self.footer =
+            self.message =
                 "Graceful stop requested. Ralph will exit after the current iteration.".to_string();
         } else {
-            self.footer = DEFAULT_TUI_FOOTER.to_string();
+            self.message = DEFAULT_TUI_MESSAGE.to_string();
         }
     }
 
@@ -352,9 +590,11 @@ impl UiApp {
         self.iteration_input_mode = false;
         self.iteration_input_value = DEFAULT_ADDITIONAL_ITERATIONS.to_string();
         self.iteration_input_error = None;
+        self.reflect_available = true;
+        self.focus_ralph();
         self.status = "Waiting for iteration input".to_string();
-        self.footer = format!(
-            "Reached the current iteration budget ({total_iterations}). Press n for 1 more, x to add more (default {DEFAULT_ADDITIONAL_ITERATIONS}), q/Esc to exit."
+        self.message = format!(
+            "Reached the current iteration budget ({total_iterations}). Press n for 1 more, x for a custom amount, r to run reflection, or q/Esc to exit."
         );
     }
 
@@ -363,6 +603,7 @@ impl UiApp {
         self.iteration_input_mode = true;
         self.iteration_input_value = DEFAULT_ADDITIONAL_ITERATIONS.to_string();
         self.iteration_input_error = None;
+        self.focus_ralph();
     }
 
     fn close_iteration_input(&mut self) {
@@ -475,8 +716,16 @@ enum ScrollTarget {
     Activity,
     Output,
     Diff,
+    Terminal,
     Timeline,
     Subagent,
+}
+
+#[derive(Clone, Copy)]
+struct SideLayout {
+    activity: Rect,
+    timeline: Rect,
+    subagent: Rect,
 }
 
 #[derive(Clone, Copy)]
@@ -484,11 +733,11 @@ struct RunLayout {
     header: Rect,
     progress: Rect,
     issue_details: Rect,
-    activity: Rect,
-    output: Rect,
-    diff: Rect,
-    timeline: Rect,
-    subagent: Rect,
+    output: Option<Rect>,
+    diff: Option<Rect>,
+    side: Option<SideLayout>,
+    terminal: Option<Rect>,
+    messages: Rect,
     footer: Rect,
 }
 
@@ -600,6 +849,12 @@ fn parse_additional_iterations(input: &str) -> Result<usize, &'static str> {
     Ok(parsed)
 }
 
+fn is_terminal_focus_escape(key: crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::F(12))
+        || (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5')))
+}
+
 enum UiEvent {
     Status(String),
     Summary(String),
@@ -618,11 +873,13 @@ enum UiEvent {
     SubagentCall(SubagentUiUpdate),
     Spinner(Option<String>),
     IterationBudgetReached(usize),
+    PostRunReflectAvailable,
     Stop(String),
 }
 
 enum WorkerControl {
     ExtendIterations(usize),
+    Reflect,
     Exit,
 }
 
@@ -858,7 +1115,7 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
             UiEvent::IssueDetails(_) => {}
             UiEvent::UsageDelta(_) => {}
             UiEvent::CostDelta(cost) => eprintln!("[usage] cost +${cost:.4}"),
-            UiEvent::Progress(line) => eprintln!("[progress] {line}"),
+            UiEvent::Progress(line) => eprintln!("[tool] {line}"),
             UiEvent::Output(line) => println!("{line}"),
             UiEvent::OutputChunk(chunk) => {
                 print!("{chunk}");
@@ -903,6 +1160,9 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
             UiEvent::IterationBudgetReached(total_iterations) => eprintln!(
                 "[ralph] Reached max iterations ({total_iterations}); TUI input required to continue"
             ),
+            UiEvent::PostRunReflectAvailable => {
+                eprintln!("[ralph] Reflection is available from the finished TUI state")
+            }
             UiEvent::Stop(line) => {
                 eprintln!("[ralph] {line}");
                 break;
@@ -916,9 +1176,16 @@ fn run_live_tui(
     ui_rx: Receiver<UiEvent>,
     control_tx: Sender<WorkerControl>,
     graceful_quit: Arc<AtomicBool>,
+    project_dir: PathBuf,
 ) -> Result<()> {
     let mut terminal = init_terminal()?;
-    let result = live_tui_loop(ui_rx, control_tx, graceful_quit, &mut terminal);
+    let result = live_tui_loop(
+        ui_rx,
+        control_tx,
+        graceful_quit,
+        &mut terminal,
+        &project_dir,
+    );
     restore_terminal(&mut terminal)?;
     result
 }
@@ -928,14 +1195,19 @@ fn live_tui_loop(
     control_tx: Sender<WorkerControl>,
     graceful_quit: Arc<AtomicBool>,
     terminal: &mut DefaultTerminal,
+    project_dir: &Path,
 ) -> Result<()> {
     let mut app = UiApp::new();
+    app.set_terminal_context(project_dir);
     let tick_rate = Duration::from_millis(100);
     let mut last_redraw = Instant::now();
     let mut worker_stopped = false;
 
     loop {
-        while let Ok(event) = ui_rx.try_recv() {
+        for _ in 0..MAX_UI_EVENTS_PER_TICK {
+            let Ok(event) = ui_rx.try_recv() else {
+                break;
+            };
             match event {
                 UiEvent::Status(message) => app.status = message,
                 UiEvent::Summary(message) => app.summary = message,
@@ -954,35 +1226,49 @@ fn live_tui_loop(
                 UiEvent::SubagentCall(update) => app.apply_subagent_update(update),
                 UiEvent::Spinner(label) => app.spinner_label = label,
                 UiEvent::IterationBudgetReached(total_iterations) => {
+                    app.reflect_available = true;
                     app.spinner_label = None;
                     app.set_iteration_extension_ready(total_iterations);
                     app.push_activity(format!(
                         "Reached iteration budget ({total_iterations}); waiting for TUI input"
                     ));
                 }
+                UiEvent::PostRunReflectAvailable => {
+                    app.reflect_available = true;
+                }
                 UiEvent::Stop(line) => {
+                    app.reflect_available = false;
                     app.awaiting_iteration_extension = false;
                     app.iteration_input_mode = false;
                     app.iteration_input_error = None;
+                    app.focus_ralph();
                     if line.contains("rate-limited") {
                         app.status = "Rate limited".to_string();
-                        app.footer = format!(
-                            "{line} | Restart with `ralph` after reset; recovery cleanup runs automatically. Press q/Esc to exit."
+                        app.message = format!(
+                            "{line} | Restart with `ralph` after reset; recovery cleanup runs automatically."
                         );
                     } else {
                         app.status = "Finished".to_string();
-                        app.footer = format!("{line} | Run finished. Press q/Esc to exit.");
+                        app.message = format!("{line} | Run finished.");
                     }
                     app.spinner_label = None;
-                    app.push_activity("Run finished. Waiting for user to exit.".to_string());
                     worker_stopped = true;
                 }
             }
         }
 
+        match app.poll_terminal_exit() {
+            Ok(Some(message)) => app.push_activity(message),
+            Ok(None) => {}
+            Err(error) => app.push_activity(format!("Embedded terminal poll failed: {error:#}")),
+        }
+
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
                 CEvent::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
                     if app.iteration_input_mode {
                         match key.code {
                             KeyCode::Esc => app.close_iteration_input(),
@@ -998,7 +1284,7 @@ fn live_tui_loop(
                                         app.push_activity(format!(
                                             "User requested {additional} additional iterations"
                                         ));
-                                        app.set_default_footer();
+                                        app.set_default_message();
                                     }
                                     Err(error) => {
                                         app.iteration_input_error = Some(error.to_string())
@@ -1015,18 +1301,131 @@ fn live_tui_loop(
                             }
                             _ => {}
                         }
+                    } else if app.terminal_focused() {
+                        if is_terminal_focus_escape(key) {
+                            app.close_terminal();
+                            app.push_activity("Embedded terminal closed by user".to_string());
+                        } else if let Some(bytes) = terminal_input_bytes(key) {
+                            if let Err(error) = app.send_terminal_input(&bytes) {
+                                app.push_activity(format!(
+                                    "Embedded terminal input failed: {error:#}"
+                                ));
+                                app.focus_ralph();
+                            }
+                        }
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
+                    {
+                        if app.has_terminal() {
+                            app.focus_terminal();
+                        } else {
+                            let area: Rect = terminal.size()?.into();
+                            app.show_column(BottomColumn::Terminal);
+                            let layout = run_layout(area, &app);
+                            match layout.terminal {
+                                Some(terminal_area) => match app.ensure_terminal(terminal_area) {
+                                    Ok(_) => app.focus_terminal(),
+                                    Err(error) => {
+                                        app.show_terminal = false;
+                                        app.push_activity(format!(
+                                            "Embedded terminal unavailable: {error:#}"
+                                        ));
+                                    }
+                                },
+                                None => app.show_terminal = false,
+                            }
+                        }
+                    } else if matches!(key.code, KeyCode::Char('1')) {
+                        if app.show_output {
+                            if let Err(error) = app.hide_column(BottomColumn::Output) {
+                                app.push_activity(error.to_string());
+                            }
+                        } else {
+                            app.show_column(BottomColumn::Output);
+                        }
+                    } else if matches!(key.code, KeyCode::Char('2')) {
+                        if app.show_diff {
+                            if let Err(error) = app.hide_column(BottomColumn::Diff) {
+                                app.push_activity(error.to_string());
+                            }
+                        } else {
+                            app.show_column(BottomColumn::Diff);
+                        }
+                    } else if matches!(key.code, KeyCode::Char('3')) {
+                        if app.show_side {
+                            if let Err(error) = app.hide_column(BottomColumn::Side) {
+                                app.push_activity(error.to_string());
+                            }
+                        } else {
+                            app.show_column(BottomColumn::Side);
+                        }
+                    } else if matches!(
+                        key.code,
+                        KeyCode::Char('4') | KeyCode::Char('t') | KeyCode::Char('T')
+                    ) {
+                        if app.terminal_visible() {
+                            app.close_terminal();
+                        } else {
+                            let area: Rect = terminal.size()?.into();
+                            app.show_column(BottomColumn::Terminal);
+                            let layout = run_layout(area, &app);
+                            match layout.terminal {
+                                Some(terminal_area) => match app.ensure_terminal(terminal_area) {
+                                    Ok(created) => {
+                                        app.focus_terminal();
+                                        if created {
+                                            app.push_activity(
+                                                "Embedded terminal started".to_string(),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        app.show_terminal = false;
+                                        app.push_activity(format!(
+                                            "Embedded terminal unavailable: {}",
+                                            compact_text(&error.to_string(), 160)
+                                        ));
+                                    }
+                                },
+                                None => {
+                                    app.show_terminal = false;
+                                }
+                            }
+                        }
                     } else if app.awaiting_iteration_extension {
                         match key.code {
                             KeyCode::Char('n') => {
                                 let _ = control_tx.send(WorkerControl::ExtendIterations(1));
                                 app.awaiting_iteration_extension = false;
+                                app.reflect_available = false;
                                 app.status = "Resuming with 1 more iteration".to_string();
                                 app.push_activity(
                                     "User requested 1 additional iteration".to_string(),
                                 );
-                                app.set_default_footer();
+                                app.set_default_message();
                             }
                             KeyCode::Char('x') | KeyCode::Char('X') => app.open_iteration_input(),
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                let _ = control_tx.send(WorkerControl::Reflect);
+                                app.status = "Running reflection suite".to_string();
+                                app.message = "Running reflection suite from the paused TUI state."
+                                    .to_string();
+                            }
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                let _ = control_tx.send(WorkerControl::Exit);
+                                app.should_quit = true;
+                            }
+                            _ => {}
+                        }
+                    } else if app.reflect_available {
+                        match key.code {
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                let _ = control_tx.send(WorkerControl::Reflect);
+                                app.status = "Running reflection suite".to_string();
+                                app.message =
+                                    "Running reflection suite from the finished TUI state."
+                                        .to_string();
+                            }
                             KeyCode::Char('q') | KeyCode::Esc => {
                                 let _ = control_tx.send(WorkerControl::Exit);
                                 app.should_quit = true;
@@ -1039,13 +1438,24 @@ fn live_tui_loop(
                     {
                         graceful_quit.store(true, Ordering::Relaxed);
                         app.graceful_quit_requested = true;
-                        app.set_default_footer();
+                        app.set_default_message();
                         app.push_activity("Graceful stop requested by user".to_string());
                     }
                 }
                 CEvent::Mouse(mouse) => {
                     let area = terminal.size()?;
-                    handle_run_mouse_scroll(&mut app, mouse, area.into());
+                    handle_run_mouse_event(&mut app, mouse, area.into());
+                }
+                CEvent::Resize(_, _) => {
+                    let area: Rect = terminal.size()?.into();
+                    let layout = run_layout(area, &app);
+                    if let Some(terminal_area) = layout.terminal {
+                        if let Err(error) = app.sync_terminal_size(terminal_area) {
+                            app.push_activity(format!(
+                                "Embedded terminal resize failed: {error:#}"
+                            ));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1054,6 +1464,15 @@ fn live_tui_loop(
         if last_redraw.elapsed() >= tick_rate {
             if app.spinner_label.is_some() || app.has_running_calls() {
                 app.spinner_frame = (app.spinner_frame + 1) % 4;
+            }
+            if app.terminal_visible() {
+                let area: Rect = terminal.size()?.into();
+                let layout = run_layout(area, &app);
+                if let Some(terminal_area) = layout.terminal {
+                    if let Err(error) = app.sync_terminal_size(terminal_area) {
+                        app.push_activity(format!("Embedded terminal resize failed: {error:#}"));
+                    }
+                }
             }
             terminal.draw(|frame| draw_run_ui(frame, &app))?;
             last_redraw = Instant::now();
@@ -1071,12 +1490,13 @@ fn live_tui_loop(
     Ok(())
 }
 
-fn run_layout(area: Rect) -> RunLayout {
+fn run_layout(area: Rect, app: &UiApp) -> RunLayout {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(15),
             Constraint::Min(10),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(area);
@@ -1090,34 +1510,58 @@ fn run_layout(area: Rect) -> RunLayout {
         .constraints([Constraint::Length(7), Constraint::Min(1)])
         .split(upper[0]);
 
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(vertical[1]);
-    let side = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(bottom[2]);
+    let visible_columns = app.visible_bottom_columns();
+    let bottom_chunks = if visible_columns.is_empty() {
+        Vec::new()
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(
+                visible_columns
+                    .iter()
+                    .map(|_| Constraint::Ratio(1, visible_columns.len() as u32))
+                    .collect::<Vec<_>>(),
+            )
+            .split(vertical[1])
+            .to_vec()
+    };
 
-    RunLayout {
+    let mut layout = RunLayout {
         header: upper_left[0],
         progress: upper_left[1],
         issue_details: upper[1],
-        activity: side[0],
-        output: bottom[0],
-        diff: bottom[1],
-        timeline: side[1],
-        subagent: side[2],
-        footer: vertical[2],
+        output: None,
+        diff: None,
+        side: None,
+        terminal: None,
+        messages: vertical[2],
+        footer: vertical[3],
+    };
+
+    for (column, rect) in visible_columns.iter().zip(bottom_chunks.into_iter()) {
+        match column {
+            BottomColumn::Output => layout.output = Some(rect),
+            BottomColumn::Diff => layout.diff = Some(rect),
+            BottomColumn::Terminal => layout.terminal = Some(rect),
+            BottomColumn::Side => {
+                let side = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(50),
+                        Constraint::Percentage(25),
+                        Constraint::Percentage(25),
+                    ])
+                    .split(rect);
+                layout.side = Some(SideLayout {
+                    activity: side[0],
+                    timeline: side[1],
+                    subagent: side[2],
+                });
+            }
+        }
     }
+
+    layout
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
@@ -1235,30 +1679,73 @@ fn run_scroll_target(layout: RunLayout, column: u16, row: u16) -> Option<ScrollT
         Some(ScrollTarget::Progress)
     } else if point_in_rect(layout.issue_details, column, row) {
         Some(ScrollTarget::IssueDetails)
-    } else if point_in_rect(layout.activity, column, row) {
+    } else if layout
+        .side
+        .map(|side| point_in_rect(side.activity, column, row))
+        .unwrap_or(false)
+    {
         Some(ScrollTarget::Activity)
-    } else if point_in_rect(layout.output, column, row) {
+    } else if layout
+        .output
+        .map(|rect| point_in_rect(rect, column, row))
+        .unwrap_or(false)
+    {
         Some(ScrollTarget::Output)
-    } else if point_in_rect(layout.diff, column, row) {
+    } else if layout
+        .diff
+        .map(|rect| point_in_rect(rect, column, row))
+        .unwrap_or(false)
+    {
         Some(ScrollTarget::Diff)
-    } else if point_in_rect(layout.timeline, column, row) {
+    } else if layout
+        .terminal
+        .map(|rect| point_in_rect(rect, column, row))
+        .unwrap_or(false)
+    {
+        Some(ScrollTarget::Terminal)
+    } else if layout
+        .side
+        .map(|side| point_in_rect(side.timeline, column, row))
+        .unwrap_or(false)
+    {
         Some(ScrollTarget::Timeline)
-    } else if point_in_rect(layout.subagent, column, row) {
+    } else if layout
+        .side
+        .map(|side| point_in_rect(side.subagent, column, row))
+        .unwrap_or(false)
+    {
         Some(ScrollTarget::Subagent)
     } else {
         None
     }
 }
 
-fn handle_run_mouse_scroll(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
-    if !matches!(
-        mouse.kind,
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-    ) {
-        return;
+fn handle_run_mouse_event(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
+    let layout = run_layout(area, app);
+    let terminal_hit = layout
+        .terminal
+        .map(|rect| point_in_rect(rect, mouse.column, mouse.row))
+        .unwrap_or(false);
+
+    match mouse.kind {
+        MouseEventKind::Down(_) => {
+            if terminal_hit {
+                app.focus_terminal();
+            } else {
+                app.focus_ralph();
+            }
+        }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            if terminal_hit {
+                app.focus_terminal();
+                app.scroll_terminal(mouse.kind);
+                return;
+            }
+            app.focus_ralph();
+        }
+        _ => return,
     }
 
-    let layout = run_layout(area);
     let spinner = SPINNER_FRAMES[app.spinner_frame];
     let tool_lines = app.tool_panel_lines(spinner);
     let subagent_lines = app.subagent_panel_lines(spinner);
@@ -1278,32 +1765,42 @@ fn handle_run_mouse_scroll(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
         ),
         Some(ScrollTarget::Activity) => apply_scroll_delta(
             &mut app.activity_scroll,
-            wrapped_row_count_for_lines(&app.activity_lines, layout.activity),
-            layout.activity,
+            wrapped_row_count_for_lines(
+                &app.activity_lines,
+                layout.side.expect("side layout missing").activity,
+            ),
+            layout.side.expect("side layout missing").activity,
             mouse.kind,
         ),
         Some(ScrollTarget::Output) => apply_scroll_delta(
             &mut app.output_scroll,
-            wrapped_row_count_for_lines(&app.output_lines, layout.output),
-            layout.output,
+            wrapped_row_count_for_lines(&app.output_lines, layout.output.expect("output missing")),
+            layout.output.expect("output missing"),
             mouse.kind,
         ),
         Some(ScrollTarget::Diff) => apply_scroll_delta(
             &mut app.diff_scroll,
-            wrapped_row_count_for_lines(&app.diff_lines, layout.diff),
-            layout.diff,
+            wrapped_row_count_for_lines(&app.diff_lines, layout.diff.expect("diff missing")),
+            layout.diff.expect("diff missing"),
             mouse.kind,
         ),
+        Some(ScrollTarget::Terminal) => {}
         Some(ScrollTarget::Timeline) => apply_scroll_delta(
             &mut app.timeline_scroll,
-            wrapped_row_count_for_slice(&tool_lines, layout.timeline),
-            layout.timeline,
+            wrapped_row_count_for_slice(
+                &tool_lines,
+                layout.side.expect("side layout missing").timeline,
+            ),
+            layout.side.expect("side layout missing").timeline,
             mouse.kind,
         ),
         Some(ScrollTarget::Subagent) => apply_scroll_delta(
             &mut app.subagent_scroll,
-            wrapped_row_count_for_slice(&subagent_lines, layout.subagent),
-            layout.subagent,
+            wrapped_row_count_for_slice(
+                &subagent_lines,
+                layout.side.expect("side layout missing").subagent,
+            ),
+            layout.side.expect("side layout missing").subagent,
             mouse.kind,
         ),
         None => {}
@@ -1311,7 +1808,7 @@ fn handle_run_mouse_scroll(app: &mut UiApp, mouse: MouseEvent, area: Rect) {
 }
 
 fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
-    let layout = run_layout(frame.area());
+    let layout = run_layout(frame.area(), app);
     let title = "Ralph";
 
     let spinner_frames = SPINNER_FRAMES;
@@ -1368,7 +1865,7 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ACCENT_PROGRESS))
                 .title(Span::styled(
-                    "Progress Log",
+                    "Tool Log",
                     Style::default()
                         .fg(ACCENT_PROGRESS)
                         .add_modifier(Modifier::BOLD),
@@ -1407,125 +1904,199 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
         ))
         .wrap(Wrap { trim: false });
 
-    let activity = Paragraph::new(lines_from(&app.activity_lines))
-        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_ACTIVITY))
-                .title(Span::styled(
-                    "Claude Activity (Verbose)",
-                    Style::default()
-                        .fg(ACCENT_ACTIVITY)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
-        .scroll((
-            resolve_scroll(
-                app.activity_scroll,
-                wrapped_row_count_for_lines(&app.activity_lines, layout.activity),
-                layout.activity,
-            ),
-            0,
-        ))
-        .wrap(Wrap { trim: false });
+    let activity = layout.side.map(|side| {
+        let activity_lines = if app.activity_lines.is_empty() {
+            vec![Line::from("No Claude activity yet.")]
+        } else {
+            lines_from(&app.activity_lines)
+        };
+        Paragraph::new(activity_lines)
+            .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_ACTIVITY))
+                    .title(Span::styled(
+                        "Claude Activity (Verbose)",
+                        Style::default()
+                            .fg(ACCENT_ACTIVITY)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .scroll((
+                resolve_scroll(
+                    app.activity_scroll,
+                    wrapped_row_count_for_lines(&app.activity_lines, side.activity),
+                    side.activity,
+                ),
+                0,
+            ))
+            .wrap(Wrap { trim: false })
+    });
 
-    let output = Paragraph::new(lines_from_output(&app.output_lines, layout.output))
-        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_OUTPUT))
-                .title(Span::styled(
-                    "Claude Output (Narrative)",
-                    Style::default()
-                        .fg(ACCENT_OUTPUT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
-        .scroll((
-            resolve_scroll(
-                app.output_scroll,
-                wrapped_row_count_for_lines(&app.output_lines, layout.output),
-                layout.output,
-            ),
-            0,
-        ))
-        .wrap(Wrap { trim: false });
+    let output = layout.output.map(|output_rect| {
+        Paragraph::new(lines_from_output(&app.output_lines, output_rect))
+            .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_OUTPUT))
+                    .title(Span::styled(
+                        "Claude Output (Narrative)",
+                        Style::default()
+                            .fg(ACCENT_OUTPUT)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .scroll((
+                resolve_scroll(
+                    app.output_scroll,
+                    wrapped_row_count_for_lines(&app.output_lines, output_rect),
+                    output_rect,
+                ),
+                0,
+            ))
+            .wrap(Wrap { trim: false })
+    });
 
-    let diff = Paragraph::new(lines_from_diff(&app.diff_lines, layout.diff))
-        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_DIFF_HUNK))
-                .title(Span::styled(
-                    "Code Diffs",
-                    Style::default()
-                        .fg(ACCENT_DIFF_HUNK)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
-        .scroll((
-            resolve_scroll(
-                app.diff_scroll,
-                wrapped_row_count_for_lines(&app.diff_lines, layout.diff),
-                layout.diff,
-            ),
-            0,
-        ))
-        .wrap(Wrap { trim: false });
+    let terminal_border = if app.terminal_focused() {
+        ACCENT_INFO
+    } else {
+        ACCENT_DIFF_HUNK
+    };
+    let terminal_title = if app.terminal_focused() {
+        app.embedded_terminal
+            .as_ref()
+            .map(|terminal| format!("Terminal [{}] [FOCUSED]", terminal.shell_label()))
+            .unwrap_or_else(|| "Terminal [FOCUSED]".to_string())
+    } else {
+        app.embedded_terminal
+            .as_ref()
+            .map(|terminal| format!("Terminal [{}]", terminal.shell_label()))
+            .unwrap_or_else(|| "Terminal".to_string())
+    };
+    let terminal_snapshot = app
+        .embedded_terminal
+        .as_ref()
+        .map(|terminal| terminal.snapshot());
+    let terminal_pane = layout.terminal.map(|_| {
+        let terminal_lines = terminal_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.lines.clone())
+            .unwrap_or_else(|| {
+                vec![Line::from(app.terminal_error.clone().unwrap_or_else(
+                    || "Embedded terminal unavailable.".to_string(),
+                ))]
+            });
+        Paragraph::new(terminal_lines)
+            .style(Style::default())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(terminal_border))
+                    .title(Span::styled(
+                        terminal_title,
+                        Style::default()
+                            .fg(terminal_border)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .wrap(Wrap { trim: false })
+    });
+
+    let diff_pane = layout.diff.map(|diff_rect| {
+        Paragraph::new(lines_from_diff(&app.diff_lines, diff_rect))
+            .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_DIFF_HUNK))
+                    .title(Span::styled(
+                        "Code Diffs",
+                        Style::default()
+                            .fg(ACCENT_DIFF_HUNK)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .scroll((
+                resolve_scroll(
+                    app.diff_scroll,
+                    wrapped_row_count_for_lines(&app.diff_lines, diff_rect),
+                    diff_rect,
+                ),
+                0,
+            ))
+            .wrap(Wrap { trim: false })
+    });
 
     let tool_panel_lines = app.tool_panel_lines(spinner_frames[app.spinner_frame]);
     let subagent_panel_lines = app.subagent_panel_lines(spinner_frames[app.spinner_frame]);
 
-    let timeline = Paragraph::new(lines_from_slice(&tool_panel_lines))
-        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+    let timeline = layout.side.map(|side| {
+        Paragraph::new(lines_from_slice(&tool_panel_lines))
+            .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_INFO))
+                    .title(Span::styled(
+                        "Tools",
+                        Style::default()
+                            .fg(ACCENT_INFO)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .scroll((
+                resolve_scroll(
+                    app.timeline_scroll,
+                    wrapped_row_count_for_slice(&tool_panel_lines, side.timeline),
+                    side.timeline,
+                ),
+                0,
+            ))
+            .wrap(Wrap { trim: false })
+    });
+
+    let subagent = layout.side.map(|side| {
+        Paragraph::new(lines_from_slice(&subagent_panel_lines))
+            .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_ACTIVITY))
+                    .title(Span::styled(
+                        "Subagents",
+                        Style::default()
+                            .fg(ACCENT_ACTIVITY)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .scroll((
+                resolve_scroll(
+                    app.subagent_scroll,
+                    wrapped_row_count_for_slice(&subagent_panel_lines, side.subagent),
+                    side.subagent,
+                ),
+                0,
+            ))
+            .wrap(Wrap { trim: false })
+    });
+
+    let messages = Paragraph::new(app.message_text())
+        .style(Style::default().fg(FG_MAIN).bg(BG_FOOTER))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ACCENT_INFO))
                 .title(Span::styled(
-                    "Tools",
+                    "Messages",
                     Style::default()
                         .fg(ACCENT_INFO)
                         .add_modifier(Modifier::BOLD),
                 )),
-        )
-        .scroll((
-            resolve_scroll(
-                app.timeline_scroll,
-                wrapped_row_count_for_slice(&tool_panel_lines, layout.timeline),
-                layout.timeline,
-            ),
-            0,
-        ))
-        .wrap(Wrap { trim: false });
+        );
 
-    let subagent = Paragraph::new(lines_from_slice(&subagent_panel_lines))
-        .style(Style::default().fg(FG_MAIN).bg(BG_PANEL))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_ACTIVITY))
-                .title(Span::styled(
-                    "Subagents",
-                    Style::default()
-                        .fg(ACCENT_ACTIVITY)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
-        .scroll((
-            resolve_scroll(
-                app.subagent_scroll,
-                wrapped_row_count_for_slice(&subagent_panel_lines, layout.subagent),
-                layout.subagent,
-            ),
-            0,
-        ))
-        .wrap(Wrap { trim: false });
-
-    let footer = Paragraph::new(app.footer.clone())
+    let footer = Paragraph::new(app.controls_text())
         .style(Style::default().fg(FG_MUTED).bg(BG_FOOTER))
         .block(
             Block::default()
@@ -1544,12 +2115,44 @@ fn draw_run_ui(frame: &mut Frame, app: &UiApp) {
     frame.render_widget(header, layout.header);
     frame.render_widget(progress, layout.progress);
     frame.render_widget(issue_details, layout.issue_details);
-    frame.render_widget(activity, layout.activity);
-    frame.render_widget(output, layout.output);
-    frame.render_widget(diff, layout.diff);
-    frame.render_widget(timeline, layout.timeline);
-    frame.render_widget(subagent, layout.subagent);
+    if let (Some(widget), Some(side)) = (activity, layout.side) {
+        frame.render_widget(widget, side.activity);
+    }
+    if let (Some(widget), Some(output_rect)) = (output, layout.output) {
+        frame.render_widget(widget, output_rect);
+    }
+    if let (Some(widget), Some(diff_rect)) = (diff_pane, layout.diff) {
+        frame.render_widget(widget, diff_rect);
+    }
+    if let (Some(widget), Some(terminal_rect)) = (terminal_pane, layout.terminal) {
+        frame.render_widget(widget, terminal_rect);
+    }
+    if let (Some(widget), Some(side)) = (timeline, layout.side) {
+        frame.render_widget(widget, side.timeline);
+    }
+    if let (Some(widget), Some(side)) = (subagent, layout.side) {
+        frame.render_widget(widget, side.subagent);
+    }
+    frame.render_widget(messages, layout.messages);
     frame.render_widget(footer, layout.footer);
+
+    if app.terminal_visible() && app.terminal_focused() {
+        if let Some(snapshot) = terminal_snapshot.as_ref() {
+            if !snapshot.hide_cursor {
+                if let Some((cursor_row, cursor_col)) = snapshot.cursor {
+                    if let Some(terminal_rect) = layout.terminal {
+                        let x = terminal_rect.x.saturating_add(1).saturating_add(cursor_col);
+                        let y = terminal_rect.y.saturating_add(1).saturating_add(cursor_row);
+                        if x < terminal_rect.right().saturating_sub(1)
+                            && y < terminal_rect.bottom().saturating_sub(1)
+                        {
+                            frame.set_cursor_position((x, y));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if app.iteration_input_mode {
         let popup_area = centered_rect(frame.area(), 42, 7);

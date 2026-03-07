@@ -213,6 +213,7 @@ fn default_config_contents() -> &'static str {
 # capture_retries = 1\n\
 # claude_timeout_minutes = 30\n\
 # claude_retries = 1\n\
+# terminal_scrollback_lines = 10000\n\
 # close_guardrail_mode = \"warn\" # warn | strict\n"
 }
 
