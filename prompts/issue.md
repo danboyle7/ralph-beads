@@ -69,14 +69,16 @@ Beads changes are persisted by the active storage backend. There is no manual `b
 ## Source of Truth for Work
 
 - **ALL work comes from beads**
-- You MUST determine the next task by running:
+- In normal issue mode, Ralph runtime has already selected the current issue from `bd ready` and provides its ID later in this prompt
+- You MAY run `bd ready` to confirm queue state or verify completion after closing the current issue, but you MUST NOT switch to a different issue during this invocation
+- Treat the provided current issue as the only issue you may implement, branch for, commit for, and close in this run
+- If the provided issue is no longer ready or conflicts with current `bd ready` output, STOP and report the mismatch instead of choosing replacement work
+- Issue selection still comes from:
 
 ```bash
 bd ready
 ```
 
-- Select the **highest-priority unblocked non-epic issue** returned
-- If `bd ready` includes epics, skip them and choose the first ready child issue/work item instead
 - Any additional details provided later in this prompt are **context only**, not a substitute for beads
 - If no issues are ready, do NOT invent work
 
@@ -88,11 +90,11 @@ bd ready
    - Open `progress.txt`
    - Read the **Codebase Patterns** section first (if it exists)
 
-2. **Select your issue**
-   - Run `bd ready`
-   - Choose the highest-priority unblocked non-epic issue
-   - If epics appear in the ready list, skip them
+2. **Confirm your assigned issue**
+   - Read the `Current Issue` runtime section to get the preselected issue ID
+   - Optionally run `bd ready` to confirm the queue still matches the assignment
    - Use `bd show <issue-id>` to understand requirements
+   - If `bd ready` no longer includes this issue, STOP and report the mismatch
 
 3. **Verify git state**
    - Determine the default branch: `main` if it exists, otherwise `master`
@@ -197,11 +199,14 @@ git branch -d <issue-branch>
 ---
 ```
 
-15. **Check remaining work**
+15. **Check remaining work status**
 
 ```bash
 bd list --status open
 ```
+
+   - Use this only to decide whether to emit `<promise>COMPLETE</promise>`
+   - Do NOT start planning, branching for, or implementing another issue in the same invocation
 
 ---
 
@@ -243,6 +248,7 @@ After completing your issue:
 ```
 
 - Otherwise, end normally so the next iteration can continue
+- Do NOT begin a second issue in the same invocation
 
 ---
 

@@ -7,12 +7,13 @@ use chrono::Local;
 
 use crate::cli::Paths;
 
-pub(crate) const TEMPLATE_VERSION: &str = "2026-03-05.2";
+pub(crate) const TEMPLATE_VERSION: &str = "2026-03-09.2";
 
 pub(crate) struct PromptTemplates<'a> {
     pub(crate) meta: &'a str,
     pub(crate) issue: &'a str,
     pub(crate) cleanup: &'a str,
+    pub(crate) repair: &'a str,
     pub(crate) quality_check: &'a str,
     pub(crate) code_review_check: &'a str,
     pub(crate) validation_check: &'a str,
@@ -32,6 +33,8 @@ pub(crate) fn init_project(paths: &Paths, templates: &PromptTemplates<'_>) -> Re
         .context("failed to write default issue prompt")?;
     fs::write(&paths.cleanup_prompt_file, templates.cleanup)
         .context("failed to write default cleanup prompt")?;
+    fs::write(&paths.repair_prompt_file, templates.repair)
+        .context("failed to write default repair prompt")?;
     fs::write(&paths.quality_check_prompt_file, templates.quality_check)
         .context("failed to write default quality-check prompt")?;
     fs::write(
@@ -76,6 +79,7 @@ pub(crate) fn doctor_project(paths: &Paths, templates: &PromptTemplates<'_>) -> 
     ensure_file(&paths.issue_prompt_file, templates.issue, &mut changes)?;
 
     ensure_file(&paths.cleanup_prompt_file, templates.cleanup, &mut changes)?;
+    ensure_file(&paths.repair_prompt_file, templates.repair, &mut changes)?;
     ensure_file(
         &paths.quality_check_prompt_file,
         templates.quality_check,
@@ -147,6 +151,7 @@ pub(crate) fn upgrade_prompts(paths: &Paths, templates: &PromptTemplates<'_>) ->
         &paths.meta_prompt_file,
         &paths.issue_prompt_file,
         &paths.cleanup_prompt_file,
+        &paths.repair_prompt_file,
         &paths.quality_check_prompt_file,
         &paths.code_review_check_prompt_file,
         &paths.validation_check_prompt_file,
@@ -172,6 +177,8 @@ pub(crate) fn upgrade_prompts(paths: &Paths, templates: &PromptTemplates<'_>) ->
     fs::write(&paths.issue_prompt_file, templates.issue).context("failed to upgrade issue.md")?;
     fs::write(&paths.cleanup_prompt_file, templates.cleanup)
         .context("failed to upgrade cleanup.md")?;
+    fs::write(&paths.repair_prompt_file, templates.repair)
+        .context("failed to upgrade repair.md")?;
     fs::write(&paths.quality_check_prompt_file, templates.quality_check)
         .context("failed to upgrade quality-check.md")?;
     fs::write(
@@ -209,6 +216,7 @@ fn default_config_contents() -> &'static str {
 # max_iterations = 10\n\
 # reflect_every = 3\n\
 # reflect_every_epic = false\n\
+# auto_repair_enabled = true\n\
 # capture_timeout_seconds = 30\n\
 # capture_retries = 1\n\
 # claude_timeout_minutes = 30\n\

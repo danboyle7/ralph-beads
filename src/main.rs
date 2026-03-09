@@ -4,7 +4,7 @@ use std::io::{self, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +50,7 @@ use crate::terminal::{terminal_input_bytes, EmbeddedTerminal};
 const DEFAULT_META_PROMPT: &str = include_str!("../prompts/ralph.md");
 const DEFAULT_ISSUE_PROMPT: &str = include_str!("../prompts/issue.md");
 const DEFAULT_CLEANUP_PROMPT: &str = include_str!("../prompts/cleanup.md");
+const DEFAULT_REPAIR_PROMPT: &str = include_str!("../prompts/repair.md");
 const DEFAULT_QUALITY_CHECK_PROMPT: &str = include_str!("../prompts/quality-check.md");
 const DEFAULT_CODE_REVIEW_CHECK_PROMPT: &str = include_str!("../prompts/code-review-check.md");
 const DEFAULT_VALIDATION_CHECK_PROMPT: &str = include_str!("../prompts/validation-check.md");
@@ -562,7 +563,7 @@ impl UiApp {
 
     fn controls_text(&self) -> String {
         if self.iteration_input_mode {
-            "digits edit count, Enter resume, Esc cancel".to_string()
+            "digits edit count, Enter add iterations, Esc cancel".to_string()
         } else if self.awaiting_iteration_extension {
             "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [r] run reflection  [q]/[Esc] exit".to_string()
         } else if self.reflect_available {
@@ -572,7 +573,7 @@ impl UiApp {
                 "Typing goes to terminal  [{TERMINAL_CLOSE_KEY}] close terminal  click another pane to return focus"
             )
         } else {
-            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [q]/[Esc] quit now  [Shift+Q] stop after current iteration".to_string()
+            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [q]/[Esc] quit now  [Shift+Q] stop after current iteration".to_string()
         }
     }
 
@@ -599,7 +600,6 @@ impl UiApp {
     }
 
     fn open_iteration_input(&mut self) {
-        self.awaiting_iteration_extension = true;
         self.iteration_input_mode = true;
         self.iteration_input_value = DEFAULT_ADDITIONAL_ITERATIONS.to_string();
         self.iteration_input_error = None;
@@ -650,8 +650,8 @@ impl UiApp {
             };
         }
 
-        running.extend(complete);
-        running
+        complete.extend(running);
+        complete
     }
 
     fn subagent_panel_lines(&self, spinner: &str) -> Vec<String> {
@@ -704,8 +704,8 @@ impl UiApp {
             };
         }
 
-        running.extend(complete);
-        running
+        complete.extend(running);
+        complete
     }
 }
 
@@ -855,6 +855,11 @@ fn is_terminal_focus_escape(key: crossterm::event::KeyEvent) -> bool {
             && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5')))
 }
 
+fn is_graceful_stop_key(key: crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('Q'))
+        || (matches!(key.code, KeyCode::Char('q')) && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 enum UiEvent {
     Status(String),
     Summary(String),
@@ -895,6 +900,7 @@ fn main() -> Result<()> {
         meta: DEFAULT_META_PROMPT,
         issue: DEFAULT_ISSUE_PROMPT,
         cleanup: DEFAULT_CLEANUP_PROMPT,
+        repair: DEFAULT_REPAIR_PROMPT,
         quality_check: DEFAULT_QUALITY_CHECK_PROMPT,
         code_review_check: DEFAULT_CODE_REVIEW_CHECK_PROMPT,
         validation_check: DEFAULT_VALIDATION_CHECK_PROMPT,
@@ -1277,14 +1283,28 @@ fn live_tui_loop(
                                     Ok(additional) => {
                                         let _ = control_tx
                                             .send(WorkerControl::ExtendIterations(additional));
+                                        let was_waiting_for_budget =
+                                            app.awaiting_iteration_extension;
                                         app.awaiting_iteration_extension = false;
                                         app.close_iteration_input();
-                                        app.status =
-                                            format!("Resuming with {additional} more iterations");
-                                        app.push_activity(format!(
-                                            "User requested {additional} additional iterations"
-                                        ));
-                                        app.set_default_message();
+                                        if was_waiting_for_budget {
+                                            app.status = format!(
+                                                "Resuming with {additional} more iterations"
+                                            );
+                                            app.push_activity(format!(
+                                                "User requested {additional} additional iterations"
+                                            ));
+                                            app.set_default_message();
+                                        } else {
+                                            app.status =
+                                                format!("Queued {additional} more iterations");
+                                            app.message = format!(
+                                                "Added {additional} more iterations to the current run. Ralph will pick them up before it reaches the budget."
+                                            );
+                                            app.push_activity(format!(
+                                                "Queued {additional} additional iterations for the active run"
+                                            ));
+                                        }
                                     }
                                     Err(error) => {
                                         app.iteration_input_error = Some(error.to_string())
@@ -1432,14 +1452,22 @@ fn live_tui_loop(
                             }
                             _ => {}
                         }
-                    } else if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
-                        app.should_quit = true;
-                    } else if matches!(key.code, KeyCode::Char('Q')) && !app.graceful_quit_requested
-                    {
+                    } else if matches!(key.code, KeyCode::Char('n')) {
+                        let _ = control_tx.send(WorkerControl::ExtendIterations(1));
+                        app.status = "Queued 1 more iteration".to_string();
+                        app.message = "Added 1 more iteration to the current run.".to_string();
+                        app.push_activity(
+                            "Queued 1 additional iteration for the active run".to_string(),
+                        );
+                    } else if matches!(key.code, KeyCode::Char('x') | KeyCode::Char('X')) {
+                        app.open_iteration_input();
+                    } else if is_graceful_stop_key(key) && !app.graceful_quit_requested {
                         graceful_quit.store(true, Ordering::Relaxed);
                         app.graceful_quit_requested = true;
                         app.set_default_message();
                         app.push_activity("Graceful stop requested by user".to_string());
+                    } else if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                        app.should_quit = true;
                     }
                 }
                 CEvent::Mouse(mouse) => {
@@ -2477,6 +2505,16 @@ fn build_cleanup_prompt(
         issue_id,
         issue_details,
         trigger,
+    )
+}
+
+fn build_repair_prompt(paths: &Paths, trigger: &str, remaining_count: usize) -> String {
+    prompts::build_repair_prompt(
+        paths,
+        DEFAULT_META_PROMPT,
+        DEFAULT_REPAIR_PROMPT,
+        trigger,
+        remaining_count,
     )
 }
 

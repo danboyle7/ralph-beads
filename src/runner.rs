@@ -57,6 +57,85 @@ fn record_tool_note(
     }
 }
 
+fn drain_pending_iteration_extensions(
+    control_rx: Option<&Receiver<WorkerControl>>,
+    paths: &Paths,
+    ui_tx: &Sender<UiEvent>,
+    debug_logs: &mut Option<DebugLogs>,
+    summary: &RunStatsSummary<'_>,
+    total_iterations: &mut usize,
+) -> Result<()> {
+    let Some(control_rx) = control_rx else {
+        return Ok(());
+    };
+
+    let mut additional_iterations = 0_usize;
+    loop {
+        match control_rx.try_recv() {
+            Ok(WorkerControl::ExtendIterations(additional)) => {
+                additional_iterations = additional_iterations
+                    .checked_add(additional)
+                    .context("iteration extension overflowed usize")?;
+            }
+            Ok(WorkerControl::Reflect) => {
+                record_tool_note(
+                    paths,
+                    ui_tx,
+                    debug_logs,
+                    "Ignoring reflection request until the current iteration boundary".to_string(),
+                )?;
+            }
+            Ok(WorkerControl::Exit) => {}
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+
+    if additional_iterations == 0 {
+        return Ok(());
+    }
+
+    *total_iterations = total_iterations
+        .checked_add(additional_iterations)
+        .context("iteration budget overflowed usize")?;
+    update_run_state_progress(
+        paths,
+        summary.run_id,
+        None,
+        summary.iteration.saturating_sub(1),
+        *total_iterations,
+        "running",
+    )?;
+    log_progress(paths, ui_tx, format!("Max Iterations: {total_iterations}"))?;
+    log_progress(
+        paths,
+        ui_tx,
+        format!(
+            "Queued {additional_iterations} additional iteration{} from the live TUI (new budget: {total_iterations})",
+            if additional_iterations == 1 { "" } else { "s" }
+        ),
+    )?;
+    send(
+        ui_tx,
+        UiEvent::Summary(format_run_stats(
+            summary.run_id,
+            summary.open_count,
+            summary.completed_issues,
+            summary.failed_issues,
+            summary.iteration.saturating_sub(1),
+            *total_iterations,
+        )),
+    );
+    send(
+        ui_tx,
+        UiEvent::Status(format!(
+            "Added {additional_iterations} more iteration{}",
+            if additional_iterations == 1 { "" } else { "s" }
+        )),
+    );
+
+    Ok(())
+}
+
 pub(super) fn run_main_loop(cli: Cli, paths: Paths, settings: RuntimeSettings) -> Result<()> {
     let use_tui = !cli.plain && io::stdout().is_terminal();
     let (ui_tx, ui_rx) = mpsc::channel();
@@ -363,6 +442,22 @@ pub(super) fn worker_main(
 
     let mut iteration = 1_usize;
     loop {
+        let iteration_summary = RunStatsSummary {
+            run_id: &run_id,
+            open_count,
+            completed_issues,
+            failed_issues,
+            iteration,
+            total_iterations,
+        };
+        drain_pending_iteration_extensions(
+            control_rx.as_ref(),
+            &paths,
+            &ui_tx,
+            &mut debug_logs,
+            &iteration_summary,
+            &mut total_iterations,
+        )?;
         if iteration > total_iterations {
             if let Some(control_rx) = control_rx.as_ref() {
                 let mut pause_ctx = PauseContext {
@@ -443,16 +538,250 @@ pub(super) fn worker_main(
             None => {
                 let remaining = get_remaining_issue_count().unwrap_or(0);
                 if remaining > 0 {
-                    let stop_line = format!(
+                    if settings.auto_repair_enabled {
+                        let trigger =
+                            "auto-repair: no ready non-epic issue found while work remains";
+                        send(
+                            &ui_tx,
+                            UiEvent::Status("No ready work found; running repair pass".to_string()),
+                        );
+                        record_tool_note(
+                            &paths,
+                            &ui_tx,
+                            &mut debug_logs,
+                            format!(
+                                "No ready issue found with {remaining} non-closed issues remaining; running repair pass"
+                            ),
+                        )?;
+                        log_progress(
+                            &paths,
+                            &ui_tx,
+                            format!("Iteration {iteration}: Running repair pass ({trigger})"),
+                        )?;
+                        let outcome = run_repair_pass(
+                            &cli,
+                            &paths,
+                            &ui_tx,
+                            &mut debug_logs,
+                            trigger,
+                            remaining,
+                        )?;
+                        match &outcome {
+                            ClaudeOutcome::RateLimited(rate_limit) => {
+                                let reason = rate_limit.reason();
+                                let reset_at = rate_limit
+                                    .reset_at_local()
+                                    .map(|value| value.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                let progress_message = format!(
+                                    "STOPPED: Repair pass rate-limited by Claude ({reason}); reset at {reset_at}"
+                                );
+                                log_progress(&paths, &ui_tx, progress_message)?;
+                                send(
+                                    &ui_tx,
+                                    UiEvent::Status(format!(
+                                        "Stopped: repair pass rate-limited ({reason}); reset at {reset_at}"
+                                    )),
+                                );
+                                send(
+                                    &ui_tx,
+                                    UiEvent::Stop(format!(
+                                        "Repair pass rate-limited ({reason}); reset at {reset_at}"
+                                    )),
+                                );
+                                mark_run_state_finished(&paths, &run_id, "rate_limited")?;
+                                return Ok(());
+                            }
+                            ClaudeOutcome::ErrorResult(error_result) => {
+                                log_progress(
+                                    &paths,
+                                    &ui_tx,
+                                    format!(
+                                        "STOPPED: Repair pass returned an error result: {error_result}"
+                                    ),
+                                )?;
+                                send(
+                                    &ui_tx,
+                                    UiEvent::Stop(format!(
+                                        "Repair pass returned an error result: {error_result}"
+                                    )),
+                                );
+                                mark_run_state_finished(&paths, &run_id, "error")?;
+                                return Ok(());
+                            }
+                            ClaudeOutcome::Success | ClaudeOutcome::CompleteSignal => {}
+                        }
+                        open_count = get_open_issue_count().unwrap_or(open_count);
+                        let remaining_after = get_remaining_issue_count().unwrap_or(open_count);
+                        send(
+                            &ui_tx,
+                            UiEvent::Summary(format_run_stats(
+                                &run_id,
+                                open_count,
+                                completed_issues,
+                                failed_issues,
+                                iteration,
+                                total_iterations,
+                            )),
+                        );
+                        if matches!(outcome, ClaudeOutcome::CompleteSignal) || remaining_after == 0
+                        {
+                            log_progress(
+                                &paths,
+                                &ui_tx,
+                                "COMPLETE: Repair pass resolved all remaining work".to_string(),
+                            )?;
+                            if let Some(control_rx) = control_rx.as_ref() {
+                                let mut pause_ctx = PauseContext {
+                                    cli: &cli,
+                                    paths: &paths,
+                                    run_id: &run_id,
+                                    ui_tx: &ui_tx,
+                                    control_rx,
+                                    debug_logs: &mut debug_logs,
+                                };
+                                wait_for_post_run_action(
+                                    &mut pause_ctx,
+                                    PostRunActionState {
+                                        stop_line: "Repair pass resolved all remaining work",
+                                        pending_status: "completed",
+                                        summary: RunStatsSummary {
+                                            run_id: run_id.as_str(),
+                                            open_count: 0,
+                                            completed_issues,
+                                            failed_issues,
+                                            iteration,
+                                            total_iterations,
+                                        },
+                                    },
+                                )?;
+                            } else {
+                                send(
+                                    &ui_tx,
+                                    UiEvent::Stop(
+                                        "Repair pass resolved all remaining work".to_string(),
+                                    ),
+                                );
+                            }
+                            mark_run_state_finished(&paths, &run_id, "completed")?;
+                            return Ok(());
+                        }
+
+                        if let Some(repaired_issue_id) = get_next_issue()? {
+                            send(
+                                &ui_tx,
+                                UiEvent::Status(
+                                    "Repair pass completed; resuming iterations".to_string(),
+                                ),
+                            );
+                            log_progress(
+                                &paths,
+                                &ui_tx,
+                                format!(
+                                    "Iteration {iteration}: Repair pass completed; ready issue {repaired_issue_id} is now available"
+                                ),
+                            )?;
+                            repaired_issue_id
+                        } else {
+                            let stop_line = format!(
+                                "Repair pass completed, but no ready/open issues were found. {remaining_after} non-closed issues remain."
+                            );
+                            log_progress(
+                                &paths,
+                                &ui_tx,
+                                format!(
+                                    "STOPPED: Repair pass did not produce a ready issue; {remaining_after} non-closed issues remain"
+                                ),
+                            )?;
+                            if let Some(control_rx) = control_rx.as_ref() {
+                                let mut pause_ctx = PauseContext {
+                                    cli: &cli,
+                                    paths: &paths,
+                                    run_id: &run_id,
+                                    ui_tx: &ui_tx,
+                                    control_rx,
+                                    debug_logs: &mut debug_logs,
+                                };
+                                wait_for_post_run_action(
+                                    &mut pause_ctx,
+                                    PostRunActionState {
+                                        stop_line: &stop_line,
+                                        pending_status: "stopped",
+                                        summary: RunStatsSummary {
+                                            run_id: run_id.as_str(),
+                                            open_count,
+                                            completed_issues,
+                                            failed_issues,
+                                            iteration,
+                                            total_iterations,
+                                        },
+                                    },
+                                )?;
+                            } else {
+                                send(&ui_tx, UiEvent::Stop(stop_line));
+                            }
+                            mark_run_state_finished(&paths, &run_id, "stopped")?;
+                            return Ok(());
+                        }
+                    } else {
+                        let stop_line = format!(
                         "No ready/open issues. {remaining} non-closed issues remain (likely blocked/in_progress)."
                     );
-                    log_progress(
+                        log_progress(
                         &paths,
                         &ui_tx,
                         format!(
                             "STOPPED: No ready/open issues, but {remaining} non-closed issues remain"
                         ),
                     )?;
+                        if let Some(control_rx) = control_rx.as_ref() {
+                            let mut pause_ctx = PauseContext {
+                                cli: &cli,
+                                paths: &paths,
+                                run_id: &run_id,
+                                ui_tx: &ui_tx,
+                                control_rx,
+                                debug_logs: &mut debug_logs,
+                            };
+                            wait_for_post_run_action(
+                                &mut pause_ctx,
+                                PostRunActionState {
+                                    stop_line: &stop_line,
+                                    pending_status: "stopped",
+                                    summary: RunStatsSummary {
+                                        run_id: run_id.as_str(),
+                                        open_count,
+                                        completed_issues,
+                                        failed_issues,
+                                        iteration,
+                                        total_iterations,
+                                    },
+                                },
+                            )?;
+                        } else {
+                            send(&ui_tx, UiEvent::Stop(stop_line));
+                        }
+                        mark_run_state_finished(&paths, &run_id, "stopped")?;
+                        return Ok(());
+                    }
+                } else {
+                    let stop_line = "No more issues to process".to_string();
+                    log_progress(
+                        &paths,
+                        &ui_tx,
+                        "COMPLETE: No more issues to process".to_string(),
+                    )?;
+                    send(
+                        &ui_tx,
+                        UiEvent::Summary(format_run_stats(
+                            &run_id,
+                            0,
+                            completed_issues,
+                            failed_issues,
+                            iteration,
+                            total_iterations,
+                        )),
+                    );
                     if let Some(control_rx) = control_rx.as_ref() {
                         let mut pause_ctx = PauseContext {
                             cli: &cli,
@@ -466,10 +795,10 @@ pub(super) fn worker_main(
                             &mut pause_ctx,
                             PostRunActionState {
                                 stop_line: &stop_line,
-                                pending_status: "stopped",
+                                pending_status: "completed",
                                 summary: RunStatsSummary {
                                     run_id: run_id.as_str(),
-                                    open_count,
+                                    open_count: 0,
                                     completed_issues,
                                     failed_issues,
                                     iteration,
@@ -480,55 +809,9 @@ pub(super) fn worker_main(
                     } else {
                         send(&ui_tx, UiEvent::Stop(stop_line));
                     }
-                    mark_run_state_finished(&paths, &run_id, "stopped")?;
+                    mark_run_state_finished(&paths, &run_id, "completed")?;
                     return Ok(());
                 }
-                let stop_line = "No more issues to process".to_string();
-                log_progress(
-                    &paths,
-                    &ui_tx,
-                    "COMPLETE: No more issues to process".to_string(),
-                )?;
-                send(
-                    &ui_tx,
-                    UiEvent::Summary(format_run_stats(
-                        &run_id,
-                        0,
-                        completed_issues,
-                        failed_issues,
-                        iteration,
-                        total_iterations,
-                    )),
-                );
-                if let Some(control_rx) = control_rx.as_ref() {
-                    let mut pause_ctx = PauseContext {
-                        cli: &cli,
-                        paths: &paths,
-                        run_id: &run_id,
-                        ui_tx: &ui_tx,
-                        control_rx,
-                        debug_logs: &mut debug_logs,
-                    };
-                    wait_for_post_run_action(
-                        &mut pause_ctx,
-                        PostRunActionState {
-                            stop_line: &stop_line,
-                            pending_status: "completed",
-                            summary: RunStatsSummary {
-                                run_id: run_id.as_str(),
-                                open_count: 0,
-                                completed_issues,
-                                failed_issues,
-                                iteration,
-                                total_iterations,
-                            },
-                        },
-                    )?;
-                } else {
-                    send(&ui_tx, UiEvent::Stop(stop_line));
-                }
-                mark_run_state_finished(&paths, &run_id, "completed")?;
-                return Ok(());
             }
         };
 
@@ -1399,6 +1682,28 @@ pub(super) fn run_cleanup_pass(
         format!("Cleanup | trigger={trigger} | issue={run_label}"),
     );
     run_claude(cli, ui_tx, run_tag, &prompt, debug_logs)
+}
+
+pub(super) fn run_repair_pass(
+    cli: &Cli,
+    paths: &Paths,
+    ui_tx: &Sender<UiEvent>,
+    debug_logs: &mut Option<DebugLogs>,
+    trigger: &str,
+    remaining_count: usize,
+) -> Result<ClaudeOutcome> {
+    let prompt = build_repair_prompt(paths, trigger, remaining_count);
+
+    if let Some(logs) = debug_logs.as_mut() {
+        logs.set_iteration_context(0, "repair");
+    }
+
+    emit_named_output_boundary(
+        ui_tx,
+        debug_logs,
+        format!("Repair | trigger={trigger} | remaining={remaining_count}"),
+    );
+    run_claude(cli, ui_tx, "REPAIR", &prompt, debug_logs)
 }
 
 pub(super) fn run_reflection_suite(

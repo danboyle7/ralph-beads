@@ -59,6 +59,8 @@ pub(crate) struct Cli {
     pub(crate) snapshot_consistency: bool,
     #[arg(long, global = true)]
     pub(crate) skip_snapshot_consistency: bool,
+    #[arg(long, global = true)]
+    pub(crate) no_repair: bool,
 }
 
 #[derive(Clone)]
@@ -69,6 +71,7 @@ pub(crate) struct Paths {
     pub(crate) meta_prompt_file: PathBuf,
     pub(crate) issue_prompt_file: PathBuf,
     pub(crate) cleanup_prompt_file: PathBuf,
+    pub(crate) repair_prompt_file: PathBuf,
     pub(crate) quality_check_prompt_file: PathBuf,
     pub(crate) code_review_check_prompt_file: PathBuf,
     pub(crate) validation_check_prompt_file: PathBuf,
@@ -95,6 +98,7 @@ impl Paths {
             meta_prompt_file: prompts_dir.join("ralph.md"),
             issue_prompt_file: prompts_dir.join("issue.md"),
             cleanup_prompt_file: prompts_dir.join("cleanup.md"),
+            repair_prompt_file: prompts_dir.join("repair.md"),
             quality_check_prompt_file: prompts_dir.join("quality-check.md"),
             code_review_check_prompt_file: prompts_dir.join("code-review-check.md"),
             validation_check_prompt_file: prompts_dir.join("validation-check.md"),
