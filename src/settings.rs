@@ -22,6 +22,7 @@ pub(crate) struct RalphConfig {
     pub(crate) max_iterations: Option<usize>,
     pub(crate) reflect_every: Option<usize>,
     pub(crate) reflect_every_epic: Option<bool>,
+    pub(crate) auto_repair_enabled: Option<bool>,
     pub(crate) capture_timeout_seconds: Option<u64>,
     pub(crate) capture_retries: Option<usize>,
     pub(crate) claude_timeout_minutes: Option<u64>,
@@ -36,6 +37,7 @@ pub(crate) struct RuntimeSettings {
     pub(crate) max_iterations: usize,
     pub(crate) reflect_every: Option<usize>,
     pub(crate) reflect_every_epic: bool,
+    pub(crate) auto_repair_enabled: bool,
     pub(crate) capture_timeout: Duration,
     pub(crate) capture_retries: usize,
     pub(crate) claude_timeout: Duration,
@@ -56,6 +58,7 @@ pub(crate) fn default_runtime_settings() -> RuntimeSettings {
         max_iterations: DEFAULT_MAX_ITERATIONS,
         reflect_every: None,
         reflect_every_epic: false,
+        auto_repair_enabled: true,
         capture_timeout: Duration::from_secs(DEFAULT_CAPTURE_TIMEOUT_SECONDS),
         capture_retries: DEFAULT_CAPTURE_RETRIES,
         claude_timeout: Duration::from_secs(DEFAULT_CLAUDE_TIMEOUT_MINUTES * 60),
@@ -110,6 +113,9 @@ pub(crate) fn load_config(paths: &Paths) -> Result<RalphConfig> {
             }
             "reflect_every_epic" => {
                 config.reflect_every_epic = parse_bool(value);
+            }
+            "auto_repair_enabled" => {
+                config.auto_repair_enabled = parse_bool(value);
             }
             "capture_timeout_seconds" => {
                 if let Ok(parsed) = value.parse::<u64>() {
@@ -166,6 +172,11 @@ pub(crate) fn resolve_runtime_settings(cli: &mut Cli, config: &RalphConfig) -> R
         max_iterations,
         reflect_every,
         reflect_every_epic,
+        auto_repair_enabled: if cli.no_repair {
+            false
+        } else {
+            config.auto_repair_enabled.unwrap_or(true)
+        },
         capture_timeout: Duration::from_secs(
             config
                 .capture_timeout_seconds
@@ -378,6 +389,7 @@ pub(crate) fn run_preflight(
                 "max_iterations": settings.max_iterations,
                 "reflect_every": settings.reflect_every,
                 "reflect_every_epic": settings.reflect_every_epic,
+                "auto_repair_enabled": settings.auto_repair_enabled,
                 "capture_timeout_seconds": settings.capture_timeout.as_secs(),
                 "capture_retries": settings.capture_retries,
                 "claude_timeout_seconds": settings.claude_timeout.as_secs(),
@@ -426,5 +438,33 @@ fn close_guardrail_mode_label(mode: CloseGuardrailMode) -> &'static str {
     match mode {
         CloseGuardrailMode::Warn => "warn",
         CloseGuardrailMode::Strict => "strict",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn auto_repair_defaults_to_enabled() {
+        let mut cli = Cli::parse_from(["ralph"]);
+
+        let settings = resolve_runtime_settings(&mut cli, &RalphConfig::default());
+
+        assert!(settings.auto_repair_enabled);
+    }
+
+    #[test]
+    fn no_repair_flag_overrides_config() {
+        let mut cli = Cli::parse_from(["ralph", "--no-repair"]);
+        let config = RalphConfig {
+            auto_repair_enabled: Some(true),
+            ..RalphConfig::default()
+        };
+
+        let settings = resolve_runtime_settings(&mut cli, &config);
+
+        assert!(!settings.auto_repair_enabled);
     }
 }

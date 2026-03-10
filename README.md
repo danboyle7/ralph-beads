@@ -5,6 +5,7 @@
 ## How it works
 
 1. Fetches the next ready non-epic issue via `bd ready`
+   - If no non-epic issue is ready but Beads still has non-closed work, Ralph runs a repair pass first by default.
 2. Builds a prompt from:
    - `.ralph/prompts/ralph.md` (shared rules)
    - `.ralph/prompts/issue.md` (issue mode)
@@ -25,6 +26,7 @@ ralph-beads/
 │   ├── ralph.md
 │   ├── issue.md
 │   ├── cleanup.md
+│   ├── repair.md
 │   ├── quality-check.md
 │   ├── code-review-check.md
 │   └── validation-check.md
@@ -93,6 +95,9 @@ ralph --dry-run
 ralph --snapshot-consistency
 ralph --skip-snapshot-consistency
 
+# Disable the automatic repair pass when nothing is ready
+ralph --no-repair
+
 # Verbose output
 ralph --verbose
 
@@ -122,6 +127,7 @@ ralph --version
 ```
 
 Interactive TUI note:
+- While a loop is actively running, press `n` to queue one more iteration or `x` to open the same numeric prompt and add a custom amount. Ralph applies the queued increase at the next iteration boundary.
 - When Ralph reaches the current iteration budget without finishing, the TUI can extend the same run in place.
 - Press `n` for one more iteration, `x` to open a numeric prompt (prefilled with `5`) and add that many more iterations, or `r` to run the reflection suite without leaving the TUI.
 - When a run finishes or there is no ready work to do, press `r` to run the reflection suite from the finished TUI state.
@@ -131,10 +137,13 @@ Interactive TUI note:
 
 Issue selection note:
 - Ralph preserves `bd ready` ordering but skips items typed as `epic`; each loop iteration executes a single ready child issue/work item.
+- In issue mode, the runtime preselects that single issue for the current invocation. `bd ready` may be used to confirm queue state, but not to switch to a second issue mid-run.
+- If no non-epic issue is ready but non-closed work remains, Ralph runs `.ralph/prompts/repair.md` once and then re-checks `bd ready`.
 
-## Cleanup + reflection
+## Cleanup + repair + reflection
 
 - `ralph cleanup` runs `.ralph/prompts/cleanup.md` once, then exits.
+- The main loop runs `.ralph/prompts/repair.md` automatically when `bd ready` is empty but non-closed work remains, unless `--no-repair` is set or `auto_repair_enabled = false`.
 - `ralph reflect` runs all reflection prompts once, then exits:
   - `.ralph/prompts/quality-check.md`
   - `.ralph/prompts/code-review-check.md`
@@ -150,6 +159,7 @@ your-project/
     │   ├── ralph.md
     │   ├── issue.md
     │   ├── cleanup.md
+    │   ├── repair.md
     │   ├── quality-check.md
     │   ├── code-review-check.md
     │   ├── validation-check.md
@@ -160,9 +170,21 @@ your-project/
     ├── run.lock
     ├── config.toml
     ├── archive/
-    ├── logs/
+    │   └── <run-id>/
+    │       ├── progress.txt
+    │       ├── state.json
+    │       ├── issue-snapshot.json
+    │       ├── beads-snapshot.txt
+    │       └── logs/
+    │           ├── claude-events.log
+    │           ├── claude-activity.log
+    │           ├── claude-output.log
+    │           ├── claude-semantic.ndjson
+    │           └── claude-output.md
     └── .last-run
 ```
+
+`.ralph/progress.txt` is the append-only master log across all Ralph runs. Each run also writes its own snapshot under `.ralph/archive/<run-id>/progress.txt`, and any debug logs for that run live alongside it under `.ralph/archive/<run-id>/logs/`. The master log inserts a visible run separator before each new run.
 
 `ralph init` and `ralph doctor` scaffold `AGENTS.md` if missing.
 
@@ -200,6 +222,7 @@ Per-project config is read from `.ralph/config.toml`:
 max_iterations = 10
 reflect_every = 3
 reflect_every_epic = false
+auto_repair_enabled = true
 capture_timeout_seconds = 30
 capture_retries = 1
 claude_timeout_minutes = 30

@@ -59,6 +59,8 @@ pub(crate) struct Cli {
     pub(crate) snapshot_consistency: bool,
     #[arg(long, global = true)]
     pub(crate) skip_snapshot_consistency: bool,
+    #[arg(long, global = true)]
+    pub(crate) no_repair: bool,
 }
 
 #[derive(Clone)]
@@ -69,11 +71,11 @@ pub(crate) struct Paths {
     pub(crate) meta_prompt_file: PathBuf,
     pub(crate) issue_prompt_file: PathBuf,
     pub(crate) cleanup_prompt_file: PathBuf,
+    pub(crate) repair_prompt_file: PathBuf,
     pub(crate) quality_check_prompt_file: PathBuf,
     pub(crate) code_review_check_prompt_file: PathBuf,
     pub(crate) validation_check_prompt_file: PathBuf,
     pub(crate) progress_file: PathBuf,
-    pub(crate) logs_dir: PathBuf,
     pub(crate) archive_dir: PathBuf,
     pub(crate) last_run_file: PathBuf,
     pub(crate) lock_file: PathBuf,
@@ -90,17 +92,18 @@ impl Paths {
         let project_dir = std::env::current_dir().context("failed to get current directory")?;
         let ralph_dir = project_dir.join(".ralph");
         let prompts_dir = ralph_dir.join("prompts");
+        let archive_dir = ralph_dir.join("archive");
         Ok(Self {
             project_dir: project_dir.clone(),
             meta_prompt_file: prompts_dir.join("ralph.md"),
             issue_prompt_file: prompts_dir.join("issue.md"),
             cleanup_prompt_file: prompts_dir.join("cleanup.md"),
+            repair_prompt_file: prompts_dir.join("repair.md"),
             quality_check_prompt_file: prompts_dir.join("quality-check.md"),
             code_review_check_prompt_file: prompts_dir.join("code-review-check.md"),
             validation_check_prompt_file: prompts_dir.join("validation-check.md"),
             progress_file: ralph_dir.join("progress.txt"),
-            logs_dir: ralph_dir.join("logs"),
-            archive_dir: ralph_dir.join("archive"),
+            archive_dir,
             last_run_file: ralph_dir.join(".last-run"),
             lock_file: ralph_dir.join("run.lock"),
             state_file: ralph_dir.join("state.json"),
@@ -112,5 +115,17 @@ impl Paths {
             ralph_dir,
             prompts_dir,
         })
+    }
+
+    pub(crate) fn run_archive_dir(&self, run_id: &str) -> PathBuf {
+        self.archive_dir.join(run_id)
+    }
+
+    pub(crate) fn run_progress_file(&self, run_id: &str) -> PathBuf {
+        self.run_archive_dir(run_id).join("progress.txt")
+    }
+
+    pub(crate) fn run_logs_dir(&self, run_id: &str) -> PathBuf {
+        self.run_archive_dir(run_id).join("logs")
     }
 }
