@@ -89,9 +89,14 @@ pub(crate) fn load_config(paths: &Paths) -> Result<RalphConfig> {
 
     let content = fs::read_to_string(&paths.config_file)
         .with_context(|| format!("failed to read {}", paths.config_file.display()))?;
+    Ok(parse_config_contents(&content))
+}
+
+fn parse_config_contents(content: &str) -> RalphConfig {
     let mut config = RalphConfig::default();
     for raw_line in content.lines() {
-        let line = raw_line.trim();
+        let sanitized_line = strip_inline_comment(raw_line);
+        let line = sanitized_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -152,7 +157,41 @@ pub(crate) fn load_config(paths: &Paths) -> Result<RalphConfig> {
         }
     }
 
-    Ok(config)
+    config
+}
+
+fn strip_inline_comment(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            result.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_single || in_double => {
+                result.push(ch);
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                result.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                result.push(ch);
+            }
+            '#' if !in_single && !in_double => break,
+            _ => result.push(ch),
+        }
+    }
+
+    result
 }
 
 pub(crate) fn resolve_runtime_settings(cli: &mut Cli, config: &RalphConfig) -> RuntimeSettings {
@@ -466,5 +505,29 @@ mod tests {
         let settings = resolve_runtime_settings(&mut cli, &config);
 
         assert!(!settings.auto_repair_enabled);
+    }
+
+    #[test]
+    fn config_parser_accepts_inline_comments() {
+        let config = parse_config_contents(
+            r#"
+close_guardrail_mode = "strict" # enforce single-issue closure
+snapshot_consistency_enabled = true # verify beads snapshot
+"#,
+        );
+
+        assert_eq!(
+            config.close_guardrail_mode,
+            Some(CloseGuardrailMode::Strict)
+        );
+        assert_eq!(config.snapshot_consistency_enabled, Some(true));
+    }
+
+    #[test]
+    fn config_parser_keeps_hash_inside_quotes() {
+        assert_eq!(
+            strip_inline_comment(r#"close_guardrail_mode = "warn#still-value""#),
+            r#"close_guardrail_mode = "warn#still-value""#
+        );
     }
 }

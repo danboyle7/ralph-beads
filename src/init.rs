@@ -220,7 +220,8 @@ fn default_config_contents() -> &'static str {
 # claude_timeout_minutes = 30\n\
 # claude_retries = 1\n\
 # terminal_scrollback_lines = 10000\n\
-# close_guardrail_mode = \"warn\" # warn | strict\n"
+# close_guardrail_mode = \"warn\" # warn | strict\n\
+# snapshot_consistency_enabled = false\n"
 }
 
 fn default_agents_shell_contents() -> &'static str {

@@ -30,6 +30,12 @@ struct PostRunActionState<'a> {
     summary: RunStatsSummary<'a>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CloseGuardrailOutcome {
+    pub(super) continue_run: bool,
+    pub(super) issue_closed: bool,
+}
+
 fn tool_log_line(message: impl Into<String>) -> String {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
     format!("[{timestamp}] {}", message.into())
@@ -983,19 +989,25 @@ pub(super) fn worker_main(
                 return Ok(());
             }
             ClaudeOutcome::CompleteSignal => {
-                if let Some(before_statuses) = issue_status_before.as_ref() {
-                    let continue_run = enforce_single_issue_close_guardrail(
+                let guardrail_outcome = if let Some(before_statuses) = issue_status_before.as_ref()
+                {
+                    enforce_single_issue_close_guardrail(
                         &paths,
                         &issue_id,
                         before_statuses,
                         settings.close_guardrail_mode,
                         &ui_tx,
                         &mut debug_logs,
-                    )?;
-                    if !continue_run {
-                        mark_run_state_finished(&paths, &run_id, "stopped")?;
-                        return Ok(());
+                    )?
+                } else {
+                    CloseGuardrailOutcome {
+                        continue_run: true,
+                        issue_closed: true,
                     }
+                };
+                if !guardrail_outcome.continue_run {
+                    mark_run_state_finished(&paths, &run_id, "stopped")?;
+                    return Ok(());
                 }
 
                 let remaining = get_remaining_issue_count().unwrap_or(0);
@@ -1091,7 +1103,6 @@ pub(super) fn worker_main(
                     return Ok(());
                 }
 
-                completed_issues += 1;
                 match get_open_issue_count() {
                     Ok(count) => open_count = count,
                     Err(error) => record_tool_note(
@@ -1100,6 +1111,9 @@ pub(super) fn worker_main(
                         &mut debug_logs,
                         format!("Unable to refresh open issue count: {error}"),
                     )?,
+                }
+                if guardrail_outcome.issue_closed {
+                    completed_issues += 1;
                 }
                 send(
                     &ui_tx,
@@ -1120,31 +1134,46 @@ pub(super) fn worker_main(
                         "Ignoring premature COMPLETE signal: {remaining} non-closed issues remain"
                     ),
                 )?;
-                log_progress(
-                    &paths,
-                    &ui_tx,
-                    format!(
-                        "Iteration {iteration}: Completed issue {issue_id} (ignored premature COMPLETE signal; {remaining} non-closed issues remain)"
-                    ),
-                )?;
+                if guardrail_outcome.issue_closed {
+                    log_progress(
+                        &paths,
+                        &ui_tx,
+                        format!(
+                            "Iteration {iteration}: Completed issue {issue_id} (ignored premature COMPLETE signal; {remaining} non-closed issues remain)"
+                        ),
+                    )?;
+                } else {
+                    log_progress(
+                        &paths,
+                        &ui_tx,
+                        format!(
+                            "Iteration {iteration}: Claude signaled COMPLETE, but {issue_id} remains open after the close guardrail warning; {remaining} non-closed issues remain"
+                        ),
+                    )?;
+                }
             }
             ClaudeOutcome::Success => {
-                if let Some(before_statuses) = issue_status_before.as_ref() {
-                    let continue_run = enforce_single_issue_close_guardrail(
+                let guardrail_outcome = if let Some(before_statuses) = issue_status_before.as_ref()
+                {
+                    enforce_single_issue_close_guardrail(
                         &paths,
                         &issue_id,
                         before_statuses,
                         settings.close_guardrail_mode,
                         &ui_tx,
                         &mut debug_logs,
-                    )?;
-                    if !continue_run {
-                        mark_run_state_finished(&paths, &run_id, "stopped")?;
-                        return Ok(());
+                    )?
+                } else {
+                    CloseGuardrailOutcome {
+                        continue_run: true,
+                        issue_closed: true,
                     }
+                };
+                if !guardrail_outcome.continue_run {
+                    mark_run_state_finished(&paths, &run_id, "stopped")?;
+                    return Ok(());
                 }
 
-                completed_issues += 1;
                 match get_open_issue_count() {
                     Ok(count) => open_count = count,
                     Err(error) => record_tool_note(
@@ -1153,6 +1182,9 @@ pub(super) fn worker_main(
                         &mut debug_logs,
                         format!("Unable to refresh open issue count: {error}"),
                     )?,
+                }
+                if guardrail_outcome.issue_closed {
+                    completed_issues += 1;
                 }
                 send(
                     &ui_tx,
@@ -1165,11 +1197,21 @@ pub(super) fn worker_main(
                         total_iterations,
                     )),
                 );
-                log_progress(
-                    &paths,
-                    &ui_tx,
-                    format!("Iteration {iteration}: Completed issue {issue_id}"),
-                )?;
+                if guardrail_outcome.issue_closed {
+                    log_progress(
+                        &paths,
+                        &ui_tx,
+                        format!("Iteration {iteration}: Completed issue {issue_id}"),
+                    )?;
+                } else {
+                    log_progress(
+                        &paths,
+                        &ui_tx,
+                        format!(
+                            "Iteration {iteration}: Claude returned success, but {issue_id} remains open after the close guardrail warning"
+                        ),
+                    )?;
+                }
             }
         }
 
@@ -1674,7 +1716,7 @@ pub(super) fn enforce_single_issue_close_guardrail(
     mode: CloseGuardrailMode,
     ui_tx: &Sender<UiEvent>,
     debug_logs: &mut Option<DebugLogs>,
-) -> Result<bool> {
+) -> Result<CloseGuardrailOutcome> {
     if issue_id.starts_with("REFLECT-") || issue_id.starts_with("CLEANUP") {
         record_tool_note(
             paths,
@@ -1682,7 +1724,10 @@ pub(super) fn enforce_single_issue_close_guardrail(
             debug_logs,
             format!("Close guardrail skipped for non-issue run id `{issue_id}`"),
         )?;
-        return Ok(true);
+        return Ok(CloseGuardrailOutcome {
+            continue_run: true,
+            issue_closed: true,
+        });
     }
 
     let after_statuses = match get_issue_status_map() {
@@ -1690,42 +1735,37 @@ pub(super) fn enforce_single_issue_close_guardrail(
         Err(error) => {
             let message = format!("WARN: Unable to verify close guardrail: {error}");
             record_tool_note(paths, ui_tx, debug_logs, message.clone())?;
-            return Ok(true);
+            return Ok(CloseGuardrailOutcome {
+                continue_run: true,
+                issue_closed: true,
+            });
         }
     };
     let newly_closed = newly_closed_issue_ids(before_statuses, &after_statuses);
-    let expected_closed = newly_closed.iter().any(|id| id == issue_id);
+    let issue_closed = newly_closed.iter().any(|id| id == issue_id);
     let unexpected_closed = newly_closed
         .iter()
         .filter(|id| id.as_str() != issue_id)
         .cloned()
         .collect::<Vec<String>>();
 
-    if expected_closed && unexpected_closed.is_empty() {
-        return Ok(true);
+    if issue_closed && unexpected_closed.is_empty() {
+        return Ok(CloseGuardrailOutcome {
+            continue_run: true,
+            issue_closed: true,
+        });
     }
 
-    let message = if !expected_closed && unexpected_closed.is_empty() {
-        format!(
-            "Close guardrail violation: expected `{issue_id}` to close this iteration, but it did not."
-        )
-    } else if expected_closed {
-        format!(
-            "Close guardrail violation: expected only `{issue_id}` to close, but additional issues closed: {}",
-            unexpected_closed.join(", ")
-        )
-    } else {
-        format!(
-            "Close guardrail violation: `{issue_id}` did not close and unexpected issues closed: {}",
-            unexpected_closed.join(", ")
-        )
-    };
+    let message = close_guardrail_violation_message(issue_id, issue_closed, &unexpected_closed);
 
     match mode {
         CloseGuardrailMode::Warn => {
             let warn = format!("WARN: {message}");
             record_tool_note(paths, ui_tx, debug_logs, warn.clone())?;
-            Ok(true)
+            Ok(CloseGuardrailOutcome {
+                continue_run: true,
+                issue_closed,
+            })
         }
         CloseGuardrailMode::Strict => {
             let stop = format!("STOPPED: {message}");
@@ -1736,7 +1776,10 @@ pub(super) fn enforce_single_issue_close_guardrail(
                     "{message} Strict close guardrail is enabled; run stopped after this iteration."
                 )),
             );
-            Ok(false)
+            Ok(CloseGuardrailOutcome {
+                continue_run: false,
+                issue_closed,
+            })
         }
     }
 }
@@ -1888,8 +1931,54 @@ pub(super) fn run_reflection_pass(
         debug_logs,
         format!("Reflect | pass={} | trigger={trigger}", spec.pass_name),
     );
-    let _ = run_claude(cli, ui_tx, spec.pass_id, &prompt, debug_logs)?;
+    let outcome = run_claude(cli, ui_tx, spec.pass_id, &prompt, debug_logs)?;
+    if let Some(message) = reflection_failure_message(spec.pass_name, &outcome) {
+        record_tool_note(paths, ui_tx, debug_logs, format!("STOPPED: {message}"))?;
+        send(ui_tx, UiEvent::Stop(message.clone()));
+        return Err(anyhow::anyhow!(message));
+    }
     Ok(())
+}
+
+fn close_guardrail_violation_message(
+    issue_id: &str,
+    issue_closed: bool,
+    unexpected_closed: &[String],
+) -> String {
+    if !issue_closed && unexpected_closed.is_empty() {
+        format!(
+            "Close guardrail violation: expected `{issue_id}` to close this iteration, but it did not."
+        )
+    } else if issue_closed {
+        format!(
+            "Close guardrail violation: expected only `{issue_id}` to close, but additional issues closed: {}",
+            unexpected_closed.join(", ")
+        )
+    } else {
+        format!(
+            "Close guardrail violation: `{issue_id}` did not close and unexpected issues closed: {}",
+            unexpected_closed.join(", ")
+        )
+    }
+}
+
+fn reflection_failure_message(pass_name: &str, outcome: &ClaudeOutcome) -> Option<String> {
+    match outcome {
+        ClaudeOutcome::Success | ClaudeOutcome::CompleteSignal => None,
+        ClaudeOutcome::RateLimited(rate_limit) => {
+            let reason = rate_limit.reason();
+            let reset_at = rate_limit
+                .reset_at_local()
+                .map(|value| value.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(format!(
+                "Reflection pass `{pass_name}` rate-limited by Claude ({reason}); reset at {reset_at}"
+            ))
+        }
+        ClaudeOutcome::ErrorResult(error_result) => Some(format!(
+            "Reflection pass `{pass_name}` returned an error result: {error_result}"
+        )),
+    }
 }
 
 pub(super) fn detect_interrupted_issue(paths: &Paths) -> Result<Option<String>> {
@@ -1949,4 +2038,45 @@ pub(super) fn log_progress(paths: &Paths, ui_tx: &Sender<UiEvent>, message: Stri
     append_progress_line(&paths.progress_file, &line, "master progress log")?;
     send(ui_tx, UiEvent::Progress(line));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_guardrail_message_reports_issue_still_open() {
+        let message = close_guardrail_violation_message("BD-123", false, &[]);
+
+        assert!(message.contains("expected `BD-123` to close this iteration, but it did not"));
+    }
+
+    #[test]
+    fn issue_id_from_progress_line_extracts_first_token() {
+        let line = "[2026-03-10 12:00:00] Iteration 3: Processing issue BD-123 extra words";
+
+        assert_eq!(
+            issue_id_from_progress_line(line, "Processing issue "),
+            Some("BD-123".to_string())
+        );
+    }
+
+    #[test]
+    fn reflection_failure_message_reports_error_results() {
+        let outcome = ClaudeOutcome::ErrorResult("validation failed".to_string());
+
+        let message =
+            reflection_failure_message("Validation Check", &outcome).expect("message expected");
+
+        assert!(message.contains("Validation Check"));
+        assert!(message.contains("validation failed"));
+    }
+
+    #[test]
+    fn reflection_failure_message_allows_successful_passes() {
+        assert!(reflection_failure_message("Quality Check", &ClaudeOutcome::Success).is_none());
+        assert!(
+            reflection_failure_message("Quality Check", &ClaudeOutcome::CompleteSignal).is_none()
+        );
+    }
 }
