@@ -170,9 +170,21 @@ your-project/
     ├── run.lock
     ├── config.toml
     ├── archive/
-    ├── logs/
+    │   └── <run-id>/
+    │       ├── progress.txt
+    │       ├── state.json
+    │       ├── issue-snapshot.json
+    │       ├── beads-snapshot.txt
+    │       └── logs/
+    │           ├── claude-events.log
+    │           ├── claude-activity.log
+    │           ├── claude-output.log
+    │           ├── claude-semantic.ndjson
+    │           └── claude-output.md
     └── .last-run
 ```
+
+`.ralph/progress.txt` is the append-only master log across all Ralph runs. Each run also writes its own snapshot under `.ralph/archive/<run-id>/progress.txt`, and any debug logs for that run live alongside it under `.ralph/archive/<run-id>/logs/`. The master log inserts a visible run separator before each new run.
 
 `ralph init` and `ralph doctor` scaffold `AGENTS.md` if missing.
 

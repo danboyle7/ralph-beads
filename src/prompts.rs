@@ -20,12 +20,7 @@ pub(crate) fn build_issue_prompt(
         "Issue Execution",
         &meta_prompt,
         &issue_prompt,
-        build_issue_runtime_context(
-            issue_id,
-            issue_details,
-            &rules_context,
-            &progress_context,
-        ),
+        build_issue_runtime_context(issue_id, issue_details, &rules_context, &progress_context),
     )
 }
 
@@ -152,16 +147,14 @@ mod tests {
 
     #[test]
     fn issue_runtime_context_makes_single_issue_scope_explicit() {
-        let context = build_issue_runtime_context(
-            "BD-123",
-            "Issue details",
-            "Repo rules",
-            "Prior log",
-        );
+        let context =
+            build_issue_runtime_context("BD-123", "Issue details", "Repo rules", "Prior log");
 
         assert!(context.contains("authorized for exactly one issue: `BD-123`"));
         assert!(context.contains("Do not select, start, implement, branch for, commit for, or close any other issue during this invocation."));
         assert!(context.contains("never use it to replace `BD-123` with different work"));
-        assert!(context.contains("Otherwise stop normally so the next Ralph iteration can choose the next issue"));
+        assert!(context.contains(
+            "Otherwise stop normally so the next Ralph iteration can choose the next issue"
+        ));
     }
 }

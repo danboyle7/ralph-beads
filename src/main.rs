@@ -980,10 +980,9 @@ struct DebugLogs {
 
 impl DebugLogs {
     fn new(paths: &Paths, run_id: &str) -> Result<Self> {
-        fs::create_dir_all(&paths.logs_dir).context("failed to create .ralph/logs")?;
-        let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let run_dir_path = paths.logs_dir.join(format!("{timestamp}-{run_id}"));
-        fs::create_dir_all(&run_dir_path).context("failed to create run debug log directory")?;
+        let run_dir_path = paths.run_logs_dir(run_id);
+        fs::create_dir_all(&run_dir_path)
+            .context("failed to create per-run debug log directory")?;
 
         let raw_events_path = run_dir_path.join("claude-events.log");
         let activity_path = run_dir_path.join("claude-activity.log");

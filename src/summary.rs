@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::cli::Paths;
+use crate::runner::read_last_run_progress_content;
 
 pub(crate) fn print_last_run_summary(paths: &Paths) -> Result<()> {
     for line in last_run_summary_lines(paths)? {
@@ -15,12 +16,9 @@ pub(crate) fn print_last_run_summary(paths: &Paths) -> Result<()> {
 }
 
 pub(crate) fn print_last_run_summary_json(paths: &Paths) -> Result<()> {
-    if !paths.progress_file.exists() {
-        bail!("No progress log found at {}", paths.progress_file.display());
-    }
-
-    let content = fs::read_to_string(&paths.progress_file)
-        .with_context(|| format!("failed to read {}", paths.progress_file.display()))?;
+    let content = read_last_run_progress_content(paths)?.ok_or_else(|| {
+        anyhow::anyhow!("No progress log found at {}", paths.progress_file.display())
+    })?;
 
     let mut run_id = String::from("unknown");
     let mut started = String::from("unknown");
@@ -77,12 +75,9 @@ pub(crate) fn print_last_run_summary_json(paths: &Paths) -> Result<()> {
 }
 
 fn last_run_summary_lines(paths: &Paths) -> Result<Vec<String>> {
-    if !paths.progress_file.exists() {
-        bail!("No progress log found at {}", paths.progress_file.display());
-    }
-
-    let content = fs::read_to_string(&paths.progress_file)
-        .with_context(|| format!("failed to read {}", paths.progress_file.display()))?;
+    let content = read_last_run_progress_content(paths)?.ok_or_else(|| {
+        anyhow::anyhow!("No progress log found at {}", paths.progress_file.display())
+    })?;
 
     let mut run_id = String::from("unknown");
     let mut started = String::from("unknown");
@@ -157,14 +152,17 @@ struct RunInsights {
 }
 
 fn cross_run_lines(paths: &Paths) -> Result<Vec<String>> {
-    if !paths.logs_dir.exists() {
+    if !paths.archive_dir.exists() {
         return Ok(vec!["No debug logs found.".to_string()]);
     }
 
-    let mut run_dirs = fs::read_dir(&paths.logs_dir)
-        .with_context(|| format!("failed to read {}", paths.logs_dir.display()))?
+    let mut run_dirs = fs::read_dir(&paths.archive_dir)
+        .with_context(|| format!("failed to read {}", paths.archive_dir.display()))?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| {
+            let path = entry.path();
+            path.is_dir() && path.join("logs").is_dir()
+        })
         .collect::<Vec<_>>();
     run_dirs.sort_by_key(|entry| entry.file_name());
     if run_dirs.is_empty() {
@@ -173,7 +171,8 @@ fn cross_run_lines(paths: &Paths) -> Result<Vec<String>> {
 
     let mut runs = Vec::new();
     for entry in run_dirs {
-        if let Ok(run) = parse_run_insights(&entry.path()) {
+        let run_id = entry.file_name().to_string_lossy().into_owned();
+        if let Ok(run) = parse_run_insights(&run_id, &entry.path().join("logs")) {
             runs.push(run);
         }
     }
@@ -280,24 +279,20 @@ fn cross_run_lines(paths: &Paths) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn parse_run_insights(run_dir: &Path) -> Result<RunInsights> {
+fn parse_run_insights(run_id: &str, logs_dir: &Path) -> Result<RunInsights> {
     let mut insights = RunInsights {
-        run_id: run_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string(),
+        run_id: run_id.to_string(),
         ..RunInsights::default()
     };
 
-    parse_semantic_file(run_dir, &mut insights)?;
-    parse_cost_file(run_dir, &mut insights)?;
+    parse_semantic_file(logs_dir, &mut insights)?;
+    parse_cost_file(logs_dir, &mut insights)?;
 
     Ok(insights)
 }
 
-fn parse_semantic_file(run_dir: &Path, insights: &mut RunInsights) -> Result<()> {
-    let semantic_path = run_dir.join("claude-semantic.ndjson");
+fn parse_semantic_file(logs_dir: &Path, insights: &mut RunInsights) -> Result<()> {
+    let semantic_path = logs_dir.join("claude-semantic.ndjson");
     if !semantic_path.exists() {
         return Ok(());
     }
@@ -373,8 +368,8 @@ fn parse_semantic_file(run_dir: &Path, insights: &mut RunInsights) -> Result<()>
     Ok(())
 }
 
-fn parse_cost_file(run_dir: &Path, insights: &mut RunInsights) -> Result<()> {
-    let events_path = run_dir.join("claude-events.log");
+fn parse_cost_file(logs_dir: &Path, insights: &mut RunInsights) -> Result<()> {
+    let events_path = logs_dir.join("claude-events.log");
     if !events_path.exists() {
         return Ok(());
     }

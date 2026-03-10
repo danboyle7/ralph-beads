@@ -72,7 +72,6 @@ pub(crate) fn doctor_project(paths: &Paths, templates: &PromptTemplates<'_>) -> 
 
     ensure_dir(&paths.ralph_dir, &mut changes)?;
     ensure_dir(&paths.archive_dir, &mut changes)?;
-    ensure_dir(&paths.logs_dir, &mut changes)?;
     ensure_dir(&paths.prompts_dir, &mut changes)?;
 
     ensure_file(&paths.meta_prompt_file, templates.meta, &mut changes)?;
@@ -204,7 +203,6 @@ pub(crate) fn upgrade_prompts(paths: &Paths, templates: &PromptTemplates<'_>) ->
 
 fn ensure_layout(paths: &Paths) -> Result<()> {
     fs::create_dir_all(&paths.archive_dir).context("failed to create .ralph/archive")?;
-    fs::create_dir_all(&paths.logs_dir).context("failed to create .ralph/logs")?;
     fs::create_dir_all(&paths.prompts_dir).context("failed to create .ralph/prompts")?;
     Ok(())
 }
