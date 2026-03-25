@@ -566,9 +566,7 @@ impl UiApp {
     fn controls_text(&self) -> String {
         if self.iteration_input_mode {
             "digits edit count, Enter add iterations, Esc cancel".to_string()
-        } else if self.awaiting_iteration_extension {
-            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [r] run reflection  [q]/[Esc] exit".to_string()
-        } else if self.post_run_actions_available {
+        } else if self.awaiting_iteration_extension || self.post_run_actions_available {
             "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [r] run reflection  [q]/[Esc] exit".to_string()
         } else if self.reflect_available {
             "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [r] run reflection  [q]/[Esc] exit".to_string()
