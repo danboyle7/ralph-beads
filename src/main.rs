@@ -191,6 +191,7 @@ struct UiApp {
     iteration_input_value: String,
     iteration_input_error: Option<String>,
     reflect_available: bool,
+    post_run_actions_available: bool,
     should_quit: bool,
 }
 
@@ -252,6 +253,7 @@ impl UiApp {
             iteration_input_value: DEFAULT_ADDITIONAL_ITERATIONS.to_string(),
             iteration_input_error: None,
             reflect_available: false,
+            post_run_actions_available: false,
             should_quit: false,
         }
     }
@@ -565,6 +567,8 @@ impl UiApp {
         if self.iteration_input_mode {
             "digits edit count, Enter add iterations, Esc cancel".to_string()
         } else if self.awaiting_iteration_extension {
+            "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [r] run reflection  [q]/[Esc] exit".to_string()
+        } else if self.post_run_actions_available {
             "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [n] 1 more iteration  [x] custom amount  [r] run reflection  [q]/[Esc] exit".to_string()
         } else if self.reflect_available {
             "[1] toggle output  [2] toggle diff  [3] toggle activity  [4]/[t] toggle terminal  [Ctrl+T] focus terminal  [r] run reflection  [q]/[Esc] exit".to_string()
@@ -1166,7 +1170,9 @@ fn run_plain_ui(ui_rx: Receiver<UiEvent>) -> Result<()> {
                 "[ralph] Reached max iterations ({total_iterations}); TUI input required to continue"
             ),
             UiEvent::PostRunReflectAvailable => {
-                eprintln!("[ralph] Reflection is available from the finished TUI state")
+                eprintln!(
+                    "[ralph] Reflection and iteration resume are available from the finished TUI state"
+                )
             }
             UiEvent::Stop(line) => {
                 eprintln!("[ralph] {line}");
@@ -1231,6 +1237,7 @@ fn live_tui_loop(
                 UiEvent::SubagentCall(update) => app.apply_subagent_update(update),
                 UiEvent::Spinner(label) => app.spinner_label = label,
                 UiEvent::IterationBudgetReached(total_iterations) => {
+                    app.post_run_actions_available = false;
                     app.reflect_available = true;
                     app.spinner_label = None;
                     app.set_iteration_extension_ready(total_iterations);
@@ -1240,9 +1247,14 @@ fn live_tui_loop(
                 }
                 UiEvent::PostRunReflectAvailable => {
                     app.reflect_available = true;
+                    app.post_run_actions_available = true;
+                    if app.status == "Finished" {
+                        app.message = "Run finished. Press n for 1 more iteration, x for a custom amount, r to run reflection, or q/Esc to exit.".to_string();
+                    }
                 }
                 UiEvent::Stop(line) => {
                     app.reflect_available = false;
+                    app.post_run_actions_available = false;
                     app.awaiting_iteration_extension = false;
                     app.iteration_input_mode = false;
                     app.iteration_input_error = None;
@@ -1284,7 +1296,10 @@ fn live_tui_loop(
                                             .send(WorkerControl::ExtendIterations(additional));
                                         let was_waiting_for_budget =
                                             app.awaiting_iteration_extension;
+                                        let was_post_run =
+                                            app.post_run_actions_available && worker_stopped;
                                         app.awaiting_iteration_extension = false;
+                                        app.post_run_actions_available = false;
                                         app.close_iteration_input();
                                         if was_waiting_for_budget {
                                             app.status = format!(
@@ -1292,6 +1307,16 @@ fn live_tui_loop(
                                             );
                                             app.push_activity(format!(
                                                 "User requested {additional} additional iterations"
+                                            ));
+                                            app.set_default_message();
+                                        } else if was_post_run {
+                                            worker_stopped = false;
+                                            app.reflect_available = false;
+                                            app.status = format!(
+                                                "Resuming with {additional} more iterations"
+                                            );
+                                            app.push_activity(format!(
+                                                "User restarted the finished run with {additional} additional iterations"
                                             ));
                                             app.set_default_message();
                                         } else {
@@ -1429,6 +1454,34 @@ fn live_tui_loop(
                                 app.status = "Running reflection suite".to_string();
                                 app.message = "Running reflection suite from the paused TUI state."
                                     .to_string();
+                            }
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                let _ = control_tx.send(WorkerControl::Exit);
+                                app.should_quit = true;
+                            }
+                            _ => {}
+                        }
+                    } else if app.post_run_actions_available {
+                        match key.code {
+                            KeyCode::Char('n') => {
+                                let _ = control_tx.send(WorkerControl::ExtendIterations(1));
+                                app.post_run_actions_available = false;
+                                app.reflect_available = false;
+                                app.status = "Resuming with 1 more iteration".to_string();
+                                app.push_activity(
+                                    "User restarted the finished run with 1 additional iteration"
+                                        .to_string(),
+                                );
+                                app.set_default_message();
+                                worker_stopped = false;
+                            }
+                            KeyCode::Char('x') | KeyCode::Char('X') => app.open_iteration_input(),
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                let _ = control_tx.send(WorkerControl::Reflect);
+                                app.status = "Running reflection suite".to_string();
+                                app.message =
+                                    "Running reflection suite from the finished TUI state."
+                                        .to_string();
                             }
                             KeyCode::Char('q') | KeyCode::Esc => {
                                 let _ = control_tx.send(WorkerControl::Exit);

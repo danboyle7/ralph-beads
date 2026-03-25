@@ -1,0 +1,1 @@
+Create a V2 that uses claude's SDK with local claude sign-in and then we dont have to rely on events... might be a lot better. It will ahve to control new ssessions on its own, etc. MAJOR re-write but useful

@@ -714,7 +714,7 @@ pub(super) fn worker_main(
                                     control_rx,
                                     debug_logs: &mut debug_logs,
                                 };
-                                wait_for_post_run_action(
+                                if let Some(additional_iterations) = wait_for_post_run_action(
                                     &mut pause_ctx,
                                     PostRunActionState {
                                         stop_line: "Repair pass resolved all remaining work",
@@ -728,7 +728,12 @@ pub(super) fn worker_main(
                                             total_iterations,
                                         },
                                     },
-                                )?;
+                                )? {
+                                    total_iterations += additional_iterations;
+                                    iteration += 1;
+                                    open_count = get_open_issue_count().unwrap_or(open_count);
+                                    continue;
+                                }
                             } else {
                                 send(
                                     &ui_tx,
@@ -776,7 +781,7 @@ pub(super) fn worker_main(
                                     control_rx,
                                     debug_logs: &mut debug_logs,
                                 };
-                                wait_for_post_run_action(
+                                if let Some(additional_iterations) = wait_for_post_run_action(
                                     &mut pause_ctx,
                                     PostRunActionState {
                                         stop_line: &stop_line,
@@ -790,7 +795,12 @@ pub(super) fn worker_main(
                                             total_iterations,
                                         },
                                     },
-                                )?;
+                                )? {
+                                    total_iterations += additional_iterations;
+                                    iteration += 1;
+                                    open_count = get_open_issue_count().unwrap_or(open_count);
+                                    continue;
+                                }
                             } else {
                                 send(&ui_tx, UiEvent::Stop(stop_line));
                             }
@@ -817,7 +827,7 @@ pub(super) fn worker_main(
                                 control_rx,
                                 debug_logs: &mut debug_logs,
                             };
-                            wait_for_post_run_action(
+                            if let Some(additional_iterations) = wait_for_post_run_action(
                                 &mut pause_ctx,
                                 PostRunActionState {
                                     stop_line: &stop_line,
@@ -831,7 +841,12 @@ pub(super) fn worker_main(
                                         total_iterations,
                                     },
                                 },
-                            )?;
+                            )? {
+                                total_iterations += additional_iterations;
+                                iteration += 1;
+                                open_count = get_open_issue_count().unwrap_or(open_count);
+                                continue;
+                            }
                         } else {
                             send(&ui_tx, UiEvent::Stop(stop_line));
                         }
@@ -865,7 +880,7 @@ pub(super) fn worker_main(
                             control_rx,
                             debug_logs: &mut debug_logs,
                         };
-                        wait_for_post_run_action(
+                        if let Some(additional_iterations) = wait_for_post_run_action(
                             &mut pause_ctx,
                             PostRunActionState {
                                 stop_line: &stop_line,
@@ -879,7 +894,12 @@ pub(super) fn worker_main(
                                     total_iterations,
                                 },
                             },
-                        )?;
+                        )? {
+                            total_iterations += additional_iterations;
+                            iteration += 1;
+                            open_count = get_open_issue_count().unwrap_or(open_count);
+                            continue;
+                        }
                     } else {
                         send(&ui_tx, UiEvent::Stop(stop_line));
                     }
@@ -1078,7 +1098,7 @@ pub(super) fn worker_main(
                             control_rx,
                             debug_logs: &mut debug_logs,
                         };
-                        wait_for_post_run_action(
+                        if let Some(additional_iterations) = wait_for_post_run_action(
                             &mut pause_ctx,
                             PostRunActionState {
                                 stop_line: "Claude signaled completion",
@@ -1092,7 +1112,12 @@ pub(super) fn worker_main(
                                     total_iterations,
                                 },
                             },
-                        )?;
+                        )? {
+                            total_iterations += additional_iterations;
+                            iteration += 1;
+                            open_count = get_open_issue_count().unwrap_or(open_count);
+                            continue;
+                        }
                     } else {
                         send(
                             &ui_tx,
@@ -1426,7 +1451,7 @@ fn wait_for_iteration_extension(
 fn wait_for_post_run_action(
     ctx: &mut PauseContext<'_>,
     state: PostRunActionState<'_>,
-) -> Result<()> {
+) -> Result<Option<usize>> {
     update_run_state_progress(
         ctx.paths,
         ctx.run_id,
@@ -1440,6 +1465,59 @@ fn wait_for_post_run_action(
 
     loop {
         match ctx.control_rx.recv() {
+            Ok(WorkerControl::ExtendIterations(additional_iterations)) => {
+                let new_total_iterations = state.summary.total_iterations + additional_iterations;
+                update_run_state_progress(
+                    ctx.paths,
+                    ctx.run_id,
+                    None,
+                    state.summary.iteration,
+                    new_total_iterations,
+                    "running",
+                )?;
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!("Max Iterations: {new_total_iterations}"),
+                )?;
+                log_progress(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    format!(
+                        "Resuming finished run with {additional_iterations} additional iteration{} (next iteration: {}/{new_total_iterations})",
+                        if additional_iterations == 1 { "" } else { "s" },
+                        state.summary.iteration + 1,
+                    ),
+                )?;
+                record_tool_note(
+                    ctx.paths,
+                    ctx.ui_tx,
+                    ctx.debug_logs,
+                    format!(
+                        "Post-run TUI resumed the run with {additional_iterations} additional iteration{}",
+                        if additional_iterations == 1 { "" } else { "s" }
+                    ),
+                )?;
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Summary(format_run_stats(
+                        state.summary.run_id,
+                        state.summary.open_count,
+                        state.summary.completed_issues,
+                        state.summary.failed_issues,
+                        state.summary.iteration,
+                        new_total_iterations,
+                    )),
+                );
+                send(
+                    ctx.ui_tx,
+                    UiEvent::Status(format!(
+                        "Resuming with {additional_iterations} more iteration{}",
+                        if additional_iterations == 1 { "" } else { "s" }
+                    )),
+                );
+                return Ok(Some(additional_iterations));
+            }
             Ok(WorkerControl::Reflect) => {
                 send(
                     ctx.ui_tx,
@@ -1487,8 +1565,7 @@ fn wait_for_post_run_action(
                 send(ctx.ui_tx, UiEvent::Stop(state.stop_line.to_string()));
                 send(ctx.ui_tx, UiEvent::PostRunReflectAvailable);
             }
-            Ok(WorkerControl::Exit) | Err(_) => return Ok(()),
-            Ok(WorkerControl::ExtendIterations(_)) => {}
+            Ok(WorkerControl::Exit) | Err(_) => return Ok(None),
         }
     }
 }
