@@ -12,8 +12,8 @@ Produce actionable remediation work in beads before new feature work continues.
 1. Review repository structure and implementation quality using concrete evidence (file paths, commands, failing checks).
 2. Keep only real findings (no speculative or style-only noise).
 3. If findings exist:
-   - Create one remediation epic issue in beads (feature type is acceptable if epic type is unavailable).
-   - Create one scoped child issue per finding and link each to that epic.
+   - Create one remediation epic in beads using `--type epic`. Never use `feature`, `task`, or `bug` for the parent container.
+   - Create one scoped child issue per finding (`--type task`, `bug`, etc.) and link each to the epic with `bd dep add <child-id> <epic-id>`.
    - Block currently open implementation issues on the remediation epic so work pauses until remediation is addressed.
    - Update `rules.md` with concise rules that prevent the detected recurring patterns.
    - Confirm all created issues/dependencies exist by re-checking `bd show`/`bd list`.

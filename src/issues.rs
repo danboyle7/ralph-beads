@@ -35,6 +35,8 @@ pub(crate) fn get_open_issue_count() -> Result<usize> {
             "list",
             "--status",
             "open",
+            "--limit",
+            "0",
             "--flat",
             "--json",
             "--no-pager",
@@ -47,7 +49,16 @@ pub(crate) fn get_open_issue_count() -> Result<usize> {
 
 pub(crate) fn get_remaining_issue_count() -> Result<usize> {
     let output = run_bd_query(
-        ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
+        [
+            "bd",
+            "list",
+            "--all",
+            "--limit",
+            "0",
+            "--flat",
+            "--json",
+            "--no-pager",
+        ],
         "remaining issue count",
     )?;
     let value: Value = serde_json::from_str(&output).context("failed to parse bd list JSON")?;
@@ -70,7 +81,16 @@ pub(crate) fn get_remaining_issue_count() -> Result<usize> {
 
 pub(crate) fn get_issue_status_map() -> Result<HashMap<String, String>> {
     let output = run_bd_query(
-        ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
+        [
+            "bd",
+            "list",
+            "--all",
+            "--limit",
+            "0",
+            "--flat",
+            "--json",
+            "--no-pager",
+        ],
         "issue status map",
     )?;
     let value: Value = serde_json::from_str(&output).context("failed to parse bd list JSON")?;
@@ -94,7 +114,16 @@ pub(crate) fn get_issue_status_map() -> Result<HashMap<String, String>> {
 
 pub(crate) fn get_issue_type_map() -> Result<HashMap<String, String>> {
     let output = run_bd_query(
-        ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
+        [
+            "bd",
+            "list",
+            "--all",
+            "--limit",
+            "0",
+            "--flat",
+            "--json",
+            "--no-pager",
+        ],
         "issue type map",
     )?;
     let value: Value = serde_json::from_str(&output).context("failed to parse bd list JSON")?;
@@ -251,7 +280,16 @@ pub(crate) fn get_issue_type(issue_id: &str) -> Result<Option<String>> {
 
 pub(crate) fn is_non_closed_issue(issue_id: &str) -> Result<bool> {
     let output = run_bd_query(
-        ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
+        [
+            "bd",
+            "list",
+            "--all",
+            "--limit",
+            "0",
+            "--flat",
+            "--json",
+            "--no-pager",
+        ],
         "interrupted issue check",
     )?;
     let value: Value = serde_json::from_str(&output).context("failed to parse bd list JSON")?;
@@ -279,7 +317,16 @@ pub(crate) fn is_non_closed_issue(issue_id: &str) -> Result<bool> {
 
 fn get_all_issue_ids() -> Result<Vec<String>> {
     let output = capture::run_capture(
-        ["bd", "list", "--all", "--flat", "--json", "--no-pager"],
+        [
+            "bd",
+            "list",
+            "--all",
+            "--limit",
+            "0",
+            "--flat",
+            "--json",
+            "--no-pager",
+        ],
         Duration::from_secs(SNAPSHOT_CAPTURE_TIMEOUT_SECONDS),
         0,
     )

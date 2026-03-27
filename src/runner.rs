@@ -1624,7 +1624,7 @@ pub(super) fn archive_previous_run(paths: &Paths, ui_tx: &Sender<UiEvent>) -> Re
     } else {
         None
     };
-    let beads_snapshot = run_capture(["bd", "list", "--all"]).ok();
+    let beads_snapshot = run_capture(["bd", "list", "--all", "--limit", "0"]).ok();
     let should_archive = legacy_progress.is_some()
         || paths.state_file.exists()
         || paths.issue_snapshot_file.exists()

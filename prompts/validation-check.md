@@ -12,8 +12,8 @@ Detect behavioral drift or incomplete delivery, then generate blocking remediati
 1. Compare implemented behavior against issue goals, acceptance expectations, and related plan artifacts.
 2. Identify mismatches: missing requirements, incorrect behavior, regressions, or unvalidated assumptions.
 3. If mismatches exist:
-   - Create one remediation epic issue in beads for validation findings.
-   - Create child remediation issues for each mismatch and link them to that epic.
+   - Create one remediation epic in beads using `--type epic`. Never use `feature`, `task`, or `bug` for the parent container.
+   - Create child remediation issues for each mismatch (`--type task`, `bug`, etc.) and link them to the epic with `bd dep add <child-id> <epic-id>`.
    - Block current open implementation issues on the remediation epic until validation gaps are resolved.
    - Update `rules.md` with prevention rules learned from these gaps.
    - Confirm all created issues/dependencies exist by re-checking `bd show`/`bd list`.

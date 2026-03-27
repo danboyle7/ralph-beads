@@ -21,6 +21,7 @@ Repair Beads planning/state so the queue becomes truthful again.
    - fixing, adding, or removing dependencies so the ready queue reflects the real execution order
    - filing a blocker/follow-up issue when the remaining work is genuinely blocked
    - closing stale issues/epics that are already complete
+   - **fixing incorrect issue types**: if a parent/container issue was created as `feature`, `task`, or `bug` instead of `epic`, update it to `--type epic` — only `epic` is a valid container type
 5. Re-check `bd ready` after your changes.
 6. If all work is now complete, output `<promise>COMPLETE</promise>`.
 

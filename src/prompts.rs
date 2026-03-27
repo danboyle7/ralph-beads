@@ -60,9 +60,9 @@ pub(crate) fn build_repair_prompt(
     let progress_context = read_last_lines(&paths.progress_file, 50);
     let ready_issues = run_capture(["bd", "ready"])
         .unwrap_or_else(|error| format!("Unable to load `bd ready`: {error}"));
-    let open_issues = run_capture(["bd", "list", "--status", "open"])
+    let open_issues = run_capture(["bd", "list", "--status", "open", "--limit", "0"])
         .unwrap_or_else(|error| format!("Unable to load open issues: {error}"));
-    let all_issues = run_capture(["bd", "list", "--all"])
+    let all_issues = run_capture(["bd", "list", "--all", "--limit", "0"])
         .unwrap_or_else(|error| format!("Unable to load `bd list --all`: {error}"));
     let rules_context = read_rules_context(paths);
 
@@ -87,9 +87,9 @@ pub(crate) fn build_reflection_prompt(
     let meta_prompt = load_prompt_with_fallback(&paths.meta_prompt_file, default_meta_prompt);
     let mode_prompt = load_prompt_with_fallback(prompt_path, fallback_prompt);
     let progress_context = read_last_lines(&paths.progress_file, 60);
-    let beads_all = run_capture(["bd", "list", "--all"])
+    let beads_all = run_capture(["bd", "list", "--all", "--limit", "0"])
         .unwrap_or_else(|error| format!("Unable to load `bd list --all`: {error}"));
-    let open_issues = run_capture(["bd", "list", "--status", "open"])
+    let open_issues = run_capture(["bd", "list", "--status", "open", "--limit", "0"])
         .unwrap_or_else(|error| format!("Unable to load open issues: {error}"));
     let rules_context = read_rules_context(paths);
 
