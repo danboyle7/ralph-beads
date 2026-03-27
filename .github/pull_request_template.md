@@ -15,21 +15,6 @@ Describe what this PR changes and why.
 
 Closes #
 
-## Validation
-
-Describe what you ran and results.
-
-```bash
-cargo check
-```
-
-If prompt templates were changed, also include throwaway-repo dry-run checks:
-
-```bash
-cargo run --bin ralph -- --dry-run
-cargo run --bin ralph -- --dry-run --verbose
-```
-
 ## Breaking Changes
 
 - [ ] None

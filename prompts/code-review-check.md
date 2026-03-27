@@ -13,8 +13,8 @@ Find real defects and risky changes, then create actionable remediation work in 
 2. Prioritize correctness and operational risk over style nits.
 3. For each validated finding, record concrete evidence (file path, behavior, command output, or failing check).
 4. If findings exist:
-   - Create one remediation epic issue in beads for code-review findings.
-   - Create scoped child issues for each finding and link them to that epic.
+   - Create one remediation epic in beads using `--type epic`. Never use `feature`, `task`, or `bug` for the parent container.
+   - Create scoped child issues for each finding (`--type task`, `bug`, etc.) and link them to the epic with `bd dep add <child-id> <epic-id>`.
    - Block currently open implementation issues on the remediation epic until review findings are addressed.
    - Update `rules.md` with concise, reusable prevention rules that address recurring review failures.
    - Confirm all created issues/dependencies exist by re-checking `bd show`/`bd list`.

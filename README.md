@@ -130,7 +130,7 @@ Interactive TUI note:
 - While a loop is actively running, press `n` to queue one more iteration or `x` to open the same numeric prompt and add a custom amount. Ralph applies the queued increase at the next iteration boundary.
 - When Ralph reaches the current iteration budget without finishing, the TUI can extend the same run in place.
 - Press `n` for one more iteration, `x` to open a numeric prompt (prefilled with `5`) and add that many more iterations, or `r` to run the reflection suite without leaving the TUI.
-- When a run finishes or there is no ready work to do, press `r` to run the reflection suite from the finished TUI state.
+- When a run finishes or there is no ready work to do, press `n` or `x` to refresh the same run with more iterations, or press `r` to run the reflection suite from the finished TUI state.
 - Press `1`, `2`, `3`, and `4` to toggle the output, diff, side, and terminal columns on or off. The terminal column stays on the far right when enabled.
 - Press `t` as a shortcut for the terminal column, click that pane or press `Ctrl+T` to focus it, and press `F12` to close the embedded terminal.
 - These controls only appear after the current budget is exhausted; plain mode still stops at the configured budget.

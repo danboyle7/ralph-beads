@@ -33,17 +33,6 @@ List clear, testable outcomes.
 
 Describe how this should be validated.
 
-```bash
-cargo check
-```
-
-If prompt templates are changed, also validate in a throwaway Beads repo:
-
-```bash
-cargo run --bin ralph -- --dry-run
-cargo run --bin ralph -- --dry-run --verbose
-```
-
 ## Additional Context
 
 Links, screenshots, logs, or related issues.

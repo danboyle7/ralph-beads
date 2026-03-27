@@ -16,7 +16,7 @@ Finish the interrupted issue safely, then leave the project in a consistent stat
 5. Run the required checks (tests/lint/typecheck as appropriate).
 6. Commit focused changes.
 7. Close the issue with `bd close <issue-id>`.
-8. Merge the issue branch back into `main`/`master`, then delete the issue branch.
+8. Merge the issue branch back into `main`/`master`, then delete the issue branch. Verify you are on the default branch and no stale branches remain (`git branch`).
 9. If no open issues remain, output `<promise>COMPLETE</promise>`.
 
 ## Constraints

@@ -41,6 +41,9 @@ bd update <issue-id> --description "new description"       # Update fields
 | `feature` | New functionality |
 | `task` | General work item |
 | `chore` | Maintenance, refactoring, dependencies |
+| `epic` | A parent container grouping multiple related child issues |
+
+**Epic vs Issue:** If work requires more than one discrete issue to complete, it MUST be an `epic` (`--type epic`). Never use `feature`, `task`, or `bug` as a container for grouped work — those are leaf-level work items. Epics are never executed directly; Ralph processes their children one at a time.
 
 ### Priority
 
@@ -98,8 +101,10 @@ bd ready
 
 3. **Verify git state**
    - Determine the default branch: `main` if it exists, otherwise `master`
+   - **Always checkout the default branch first**: `git checkout <default-branch>`
+   - Pull latest if a remote is configured: `git pull`
    - Start EACH issue from the default branch tip (never from a prior feature branch)
-   - Create/switch to a dedicated issue branch (example: `ralph/<issue-id>`)
+   - Create a dedicated issue branch from the default branch: `git checkout -b ralph/<issue-id>`
    - Do NOT implement directly on `main` / `master`
 
 4. **Plan the implementation**
@@ -131,10 +136,17 @@ bd ready
      - File a blocking issue in beads describing the blocker
      - STOP work on the current issue
 
-8. **Run quality checks**
-   - Typecheck, lint, tests, and any project-specific checks
+8. **Run quality checks (REQUIRED — hard gate before commit)**
+   - Run **all** of the following that apply to the project:
+     - **Formatter** (e.g., `cargo fmt`, `prettier`, `black`, `gofmt`)
+     - **Linter** (e.g., `cargo clippy`, `eslint`, `flake8`, `golangci-lint`)
+     - **Type checker** (e.g., `cargo check`, `tsc --noEmit`, `mypy`)
+     - **Tests** (e.g., `cargo test`, `npm test`, `pytest`)
+   - Fix ALL errors and warnings before proceeding to commit
+   - Re-run checks after fixing until they pass cleanly
+   - Do NOT skip any available check — if the project has it, run it
+   - Do NOT commit code that fails any check
    - Prefer adding or updating tests when modifying logic
-   - Do NOT commit failing code
 
 9. **Capture reusable knowledge**
    - If you discover a **general, reusable pattern**, add it to:
@@ -173,14 +185,17 @@ Examples:
 bd close <issue-id>
 ```
 
-13. **Merge back to default branch (REQUIRED)**
-    - Merge your issue branch into `main` / `master` before starting another issue
+13. **Merge back to default branch and clean up (REQUIRED)**
+    - Merge your issue branch into `main` / `master` immediately after committing
+    - **Delete the issue branch after merge** — do not leave stale branches behind
+    - Verify you are back on the default branch before proceeding
     - This prevents feature branches chaining off prior feature branches
 
 ```bash
 git checkout <default-branch>
 git merge --ff-only <issue-branch> || git merge --no-ff <issue-branch> -m "merge(<issue-id>): integrate issue work"
 git branch -d <issue-branch>
+git branch                          # verify: only default branch should remain
 ```
 
 14. **Append progress log**
@@ -217,8 +232,16 @@ If you discover additional work **outside the current issue**, DO NOT expand sco
 File a new issue instead:
 
 ```bash
+# Single concrete task:
 bd create "<title>" --type <bug|feature|task|chore> --priority <0-4> --description "<context>"
+
+# Multi-part work (2+ related tasks): create an epic, then child issues linked to it:
+bd create "<group title>" --type epic --priority <0-4> --description "<overview>"
+bd create "<child 1>" --type <task|bug|feature|chore> --priority <0-4> --description "<details>"
+bd dep add <child-id> <epic-id>
 ```
+
+**CRITICAL:** Never use `--type feature`, `--type task`, or `--type bug` as a container for grouped work. If the work will produce multiple child issues, the parent MUST be `--type epic`.
 
 **Fix inline ONLY if:**
 - It is blocking the current issue
@@ -254,15 +277,24 @@ After completing your issue:
 
 ## Landing the Session
 
-When finishing work, always commit locally. Push only when a git remote is configured and push permissions are available:
+Before ending, merge work back into the default branch, clean up, and optionally push:
 
 ```bash
-git add <specific files>                    # Add relevant files
-git commit -m <message>                     # Commit
-git remote -v                               # Check whether a remote is configured
-git pull --rebase                           # Run only when remote exists and push is allowed
-git push                                    # Run only when remote exists and push is allowed
-git status                                  # Verify clean local state (and remote status when applicable)
+# 1. Merge issue branch into the default branch
+git checkout <default-branch>
+git merge --ff-only <issue-branch> || git merge --no-ff <issue-branch> -m "merge(<issue-id>): integrate issue work"
+
+# 2. Delete the issue branch
+git branch -d <issue-branch>
+
+# 3. Verify clean state — should be on default branch with no stale branches
+git branch                                  # only default branch should remain
+git status                                  # working tree should be clean
+
+# 4. Push only when a remote is configured and push permissions are available
+git remote -v                               # check whether a remote is configured
+git pull --rebase                           # run only when remote exists and push is allowed
+git push                                    # run only when remote exists and push is allowed
 ```
 
 If push is skipped (no remote or no permission), note the reason in `progress.txt` before ending the session.
@@ -274,9 +306,12 @@ If push is skipped (no remote or no permission), note the reason in `progress.tx
 - One issue per iteration
 - Always use `bd ready` to choose work
 - Never execute an epic directly from the Ralph loop
+- Always run formatter, linter, type checker, and tests before every commit — no exceptions
 - Always commit before closing an issue
+- Always return to the default branch after merging — never branch off a feature branch
+- Always delete issue branches after merging them into the default branch
 - Push only when a remote is configured and permissions allow it
-- Never commit broken code
+- Never commit broken code or code that fails any quality check
 - Never use `git pull --rebase` with uncommitted changes - this corrupts git state
 - Never implement directly on main/master (only merge completed issue branches into it)
 - Never invent tasks — if `bd ready` returns nothing, STOP
